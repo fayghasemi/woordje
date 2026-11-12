@@ -4,7 +4,7 @@ import { lookup, parseInput, translateTerm, LANGS, RTL } from './lookup.js';
 import { PACKS, BUILTIN_NOUNS } from './starter.js';
 import { icon } from './icons.js';
 
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 
 // ───────────────────────── helpers ─────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
@@ -218,8 +218,10 @@ function playUrl(url, rate) {
 }
 
 // ---- ElevenLabs (premium voice). Audio is cached on the device, so each word costs credits only once.
-const elCacheKey = (text) => `${S.settings.elVoice}|${S.settings.elModel}|${text}`;
-const elReady = () => S.settings.voiceEngine === 'elevenlabs' && S.elKey && S.settings.elVoice;
+const EL_DEFAULT_VOICE = 'JBFqnCBsd6RMkjVDRZzb'; // ElevenLabs standard voice "George", available on every account
+const elVoiceId = () => S.settings.elVoice || EL_DEFAULT_VOICE;
+const elCacheKey = (text) => `${elVoiceId()}|${S.settings.elModel}|${text}`;
+const elReady = () => S.settings.voiceEngine === 'elevenlabs' && S.elKey;
 const elInflight = new Map();
 
 async function elFetch(text) {
@@ -230,7 +232,7 @@ async function elFetch(text) {
     const model = S.settings.elModel;
     const body = { text, model_id: model };
     if (/flash|turbo/.test(model)) body.language_code = 'nl'; // forces Dutch pronunciation
-    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(S.settings.elVoice)}?output_format=mp3_44100_128`, {
+    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(elVoiceId())}?output_format=mp3_44100_128`, {
       method: 'POST',
       headers: { 'xi-api-key': S.elKey, 'Content-Type': 'application/json', Accept: 'audio/mpeg' },
       body: JSON.stringify(body),
@@ -783,7 +785,7 @@ function elevenSettingsHtml(seg) {
     </div>`;
   } else if (S.elKey) {
     voiceRow = `<div class="set-row col">
-      <div><b>Speaker</b><span>${s.elVoiceName ? 'Current: ' + esc(s.elVoiceName) : 'Load your voices, or paste a voice ID'}</span></div>
+      <div><b>Speaker</b><span>${s.elVoiceName ? 'Current: ' + esc(s.elVoiceName) : 'Using the standard voice “George”. Load your voices or paste a voice ID to change it.'}</span></div>
       <div class="key-row"><input id="el-voice-id" placeholder="Voice ID" value="${esc(s.elVoice)}" autocomplete="off" autocapitalize="none" spellcheck="false"><button class="btn btn-sm btn-soft" data-action="el-save-voice">Use</button><button class="btn btn-sm btn-soft" data-action="el-load-voices">Load list</button></div>
     </div>`;
   }
