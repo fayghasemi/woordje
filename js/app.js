@@ -4,7 +4,7 @@ import { lookup, parseInput, translateTerm, LANGS, RTL } from './lookup.js';
 import { PACKS, BUILTIN_NOUNS } from './starter.js';
 import { icon } from './icons.js';
 
-const VERSION = '1.1.1';
+const VERSION = '1.2.0';
 
 // ───────────────────────── helpers ─────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
@@ -952,7 +952,8 @@ function renderAddPreview() {
       <button class="btn btn-primary btn-block" data-action="save-word">${icon('plus', 18)} Add “${esc(word)}”</button>`;
     return;
   }
-  const altTerms = [...new Set(r.alts.flatMap((x) => x.terms))].filter((t) => norm(t) !== norm(a.translation)).slice(0, 8);
+  const chosen = meaningParts(a.translation).map(norm);
+  const altTerms = [...new Set(r.alts.flatMap((x) => x.terms))].filter((t) => norm(t) !== norm(r.translation)).slice(0, 8);
   const meta = [r.pos, r.plural ? `mv. ${r.plural}` : ''].filter(Boolean).join(' · ');
   const ex = r.examples[0];
   const def = r.definitions[0];
@@ -966,13 +967,22 @@ function renderAddPreview() {
       ${meta ? `<div class="pv-meta">${esc(meta)}</div>` : ''}
       <input id="add-translation" class="pv-input big" value="${esc(a.translation)}" ${dirAttr(S.settings.lang)} aria-label="Translation">
       ${S.settings.lang2 && S.settings.lang2 !== S.settings.lang ? `<div id="add-extra" class="pv-tr2 ${a.extra ? '' : 'sk'}" ${dirAttr(S.settings.lang2)}>${esc(a.extra || '')}</div>` : ''}
-      ${altTerms.length ? `<div class="alt-chips">${altTerms.map((t) => `<button class="chip" data-action="use-alt" data-t="${esc(t)}" ${dirAttr(S.settings.lang)}>${esc(t)}</button>`).join('')}</div>` : ''}
+      ${altTerms.length ? `<div class="alt-label">Tap to add more meanings</div><div class="alt-chips">${altTerms.map((t) => `<button class="chip ${chosen.includes(norm(t)) ? 'on' : ''}" data-action="use-alt" data-t="${esc(t)}" ${dirAttr(S.settings.lang)}>${chosen.includes(norm(t)) ? '✓ ' : '+ '}${esc(t)}</button>`).join('')}</div>` : ''}
       ${def && S.settings.lang !== 'en' ? `<div class="pv-def"><small>${esc(def.pos)}</small> ${esc(def.items[0])}</div>` : ''}
       ${def && S.settings.lang === 'en' && def.items[0] && norm(def.items[0]) !== norm(a.translation) ? `<div class="pv-def"><small>${esc(def.pos)}</small> ${esc(def.items.slice(0, 2).join('; '))}</div>` : ''}
       ${ex ? `<div class="pv-ex"><p lang="nl">${highlight(ex.nl, r.word)}</p><p class="muted" ${dirAttr(S.settings.lang)}>${esc(ex.tr)}</p></div>` : ''}
       <details class="pv-note" ${a.note ? 'open' : ''}><summary>Add a note or the sentence where you saw it</summary><textarea id="add-note" rows="2" placeholder="e.g. Ik heb een afspraak bij de gemeente.">${esc(a.note)}</textarea></details>
     </div>
     <button class="btn btn-primary btn-block" data-action="save-word">${icon('plus', 18)} Add to my words</button>`;
+}
+
+// A translation can hold several meanings separated by commas: "municipality, town"
+const meaningParts = (s) => (s || '').split(/\s*[,;،]\s*/).map((x) => x.trim()).filter(Boolean);
+function toggleMeaning(current, term) {
+  const parts = meaningParts(current);
+  const i = parts.findIndex((p) => norm(p) === norm(term));
+  if (i >= 0) parts.splice(i, 1); else parts.push(term);
+  return { text: parts.join(', '), added: i < 0 };
 }
 
 function highlight(sentence, word) {
@@ -1067,7 +1077,10 @@ function detailHtml(c) {
     ${extraHtml(c, 'd-translation2')}
     ${c.note ? `<div class="d-note">${esc(c.note)}</div>` : ''}
 
-    ${alts.length ? `<div class="d-section"><h4>Other meanings</h4>${alts.map((a) => `<p ${dirAttr(c.lang)}>${a.pos ? `<small>${esc(a.pos)}</small> ` : ''}${a.terms.map(esc).join(', ')}</p>`).join('')}</div>` : ''}
+    ${alts.length ? (() => {
+      const chosen = meaningParts(c.translation).map(norm);
+      return `<div class="d-section"><h4>Other meanings <span class="h4-hint">· tap to add to the card</span></h4>${alts.map((a) => `<div class="d-alts">${a.pos ? `<small>${esc(a.pos)}</small>` : ''}<div class="alt-chips">${a.terms.map((t) => `<button class="chip ${chosen.includes(norm(t)) ? 'on' : ''}" data-action="toggle-meaning" data-id="${c.id}" data-t="${esc(t)}" ${dirAttr(c.lang)}>${chosen.includes(norm(t)) ? '✓ ' : '+ '}${esc(t)}</button>`).join('')}</div></div>`).join('')}</div>`;
+    })() : ''}
     ${c.definitions && c.definitions.length ? `<div class="d-section"><h4>Dictionary</h4>${c.definitions.slice(0, 3).map((d) => `<p><small>${esc(d.pos)}</small></p><ol>${d.items.map((i) => `<li>${esc(i)}</li>`).join('')}</ol>`).join('')}</div>` : ''}
     ${c.examples && c.examples.length ? `<div class="d-section"><h4>Examples</h4>${c.examples.map((e) => `<div class="ex"><button class="icon-btn sm" data-action="speak" data-text="${esc(e.nl)}" aria-label="Play">${icon('volume', 16)}</button><div><p lang="nl">${highlight(e.nl, c.word)}</p><p class="muted" ${dirAttr(c.lang)}>${esc(e.tr)}</p></div></div>`).join('')}</div>` : ''}
 
@@ -1619,7 +1632,22 @@ document.addEventListener('click', async (e) => {
     }
     case 'bulk-add': bulkAdd(); break;
     case 'set-art': if (S.add) { S.add.article = el.dataset.v; const t = $('#add-translation'); if (t) S.add.translation = t.value; const n = $('#add-note'); if (n) S.add.note = n.value; renderAddPreview(); } break;
-    case 'use-alt': { const t = $('#add-translation'); if (t) { t.value = el.dataset.t; S.add.translation = el.dataset.t; S.add.translationTouched = true; vibrate(5); } break; }
+    case 'use-alt': {
+      const t = $('#add-translation'); if (!t) break;
+      const { text, added } = toggleMeaning(t.value, el.dataset.t);
+      t.value = text; S.add.translation = text; S.add.translationTouched = true;
+      el.classList.toggle('on', added); el.textContent = (added ? '✓ ' : '+ ') + el.dataset.t;
+      vibrate(5); break;
+    }
+    case 'toggle-meaning': {
+      const c = S.cards.get(id); if (!c) break;
+      const { text, added } = toggleMeaning(c.translation, el.dataset.t);
+      if (!text) { toast('Keep at least one meaning'); break; }
+      c.translation = text; c.userEdited = true;
+      await saveCard(c); refreshDetail(); vibrate(5);
+      toast(added ? `Added “${esc(el.dataset.t)}”` : `Removed “${esc(el.dataset.t)}”`);
+      break;
+    }
     case 'save-word': saveWord(); break;
     case 'speak': speak(el.dataset.text); break;
     case 'speak-card': e.stopPropagation(); { const c = S.cards.get(id); if (c) speakCard(c); } break;

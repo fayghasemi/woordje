@@ -538,6 +538,13 @@ body.in-session .toast { bottom: calc(var(--safe-b) + 110px); }
 :root[data-theme="dark"] .toast { background: #2A2F3D; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .toast { background: #2A2F3D; } }
 
+/* multiple meanings */
+.alt-label { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: -4px; }
+.alt-chips .chip.on { background: var(--brand); border-color: var(--brand); color: #fff; }
+.h4-hint { text-transform: none; letter-spacing: 0; font-weight: 500; }
+.d-alts { margin-bottom: 10px; }
+.d-alts small { display: block; margin-bottom: 6px; }
+
 /* second translation language */
 .sub2 { color: var(--muted); }
 .d-translation2 { font-size: 20px; font-weight: 600; color: var(--het); margin: 0 0 4px; }
