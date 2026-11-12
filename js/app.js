@@ -1,10 +1,10 @@
 import { db, requestPersistence } from './db.js';
 import { schedule, preview, fmtInterval, strength, newSrs, State, DAY, MIN } from './fsrs.js';
-import { lookup, parseInput, LANGS, RTL } from './lookup.js';
+import { lookup, parseInput, translateTerm, LANGS, RTL } from './lookup.js';
 import { PACKS, BUILTIN_NOUNS } from './starter.js';
 import { icon } from './icons.js';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 // ───────────────────────── helpers ─────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
@@ -23,6 +23,11 @@ const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.
 // ───────────────────────── state ─────────────────────────
 const DEFAULT_SETTINGS = {
   lang: 'en',
+  lang2: '', // optional second translation language shown next to the first (e.g. 'fa')
+  voiceEngine: 'free', // 'free' | 'elevenlabs'
+  elVoice: '',
+  elVoiceName: '',
+  elModel: 'eleven_flash_v2_5',
   newPerDay: 15,
   dailyGoal: 30,
   retention: 0.9,
@@ -45,6 +50,8 @@ const S = {
   session: null,
   add: null,
   deferredInstall: null,
+  elKey: '', // kept out of settings so it never ends up in backup files
+  elVoices: null,
 };
 
 let saveStatsT = 0;
@@ -90,7 +97,7 @@ function findDuplicate(word) {
 function makeCard({ word, article = '', translation = '', note = '', tags = [] }) {
   return {
     id: uid(), word, article, translation, note, tags,
-    plural: '', pos: '', alts: [], definitions: [], examples: [],
+    plural: '', pos: '', alts: [], definitions: [], examples: [], translations: {},
     starred: false, status: translation ? 'ok' : 'pending', tries: 0,
     lang: S.settings.lang, userEdited: !!translation,
     createdAt: Date.now(), updatedAt: Date.now(), srs: {},
@@ -109,6 +116,19 @@ function applyLookup(c, r) {
   c.lang = S.settings.lang;
 }
 
+// second translation language helpers
+const needsExtra = (c) => { const l = S.settings.lang2; return !!l && l !== c.lang && c.status === 'ok' && !(c.translations && l in c.translations); };
+function extraTr(c) {
+  const l = S.settings.lang2;
+  if (!l || l === c.lang) return null;
+  const t = c.translations && c.translations[l];
+  return t ? { lang: l, text: t } : null;
+}
+function extraHtml(c, cls) {
+  const x = extraTr(c);
+  return x ? `<div class="${cls}" ${dirAttr(x.lang)} lang="${x.lang}">${esc(x.text)}</div>` : '';
+}
+
 // ───────────────────────── background lookups ─────────────────────────
 let processing = false;
 async function processPending() {
@@ -118,7 +138,24 @@ async function processPending() {
     for (;;) {
       if (!navigator.onLine) break;
       const c = [...S.cards.values()].find((x) => x.status === 'pending');
-      if (!c) break;
+      if (!c) {
+        // second language (e.g. Persian) for words that don't have it yet
+        const x = [...S.cards.values()].find(needsExtra);
+        if (!x) break;
+        const l = S.settings.lang2;
+        try {
+          const t = await translateTerm(x.word, x.article, l);
+          x.translations = { ...(x.translations || {}), [l]: t };
+        } catch {
+          if (!navigator.onLine) break;
+          x.xTries = (x.xTries || 0) + 1;
+          if (x.xTries >= 2) x.translations = { ...(x.translations || {}), [l]: '' };
+        }
+        await saveCard(x);
+        softRefresh();
+        await new Promise((r) => setTimeout(r, 250));
+        continue;
+      }
       try {
         const r = await lookup((c.article ? c.article + ' ' : '') + c.word, S.settings.lang);
         const fresh = S.cards.get(c.id);
@@ -149,27 +186,106 @@ function pickVoice() {
   nlVoice = vs.find((v) => v.lang === 'nl-NL' && /google|xander|claire|ellen|natural|premium|enhanced/i.test(v.name))
     || vs.find((v) => v.lang === 'nl-NL') || vs.find((v) => /^nl/i.test(v.lang)) || null;
 }
-let audioEl = null;
-function speakOnline(text, rate) {
-  // Fallback when the device has no Dutch voice: Google Translate's Dutch TTS audio
-  try {
-    if (audioEl) audioEl.pause();
-    audioEl = new Audio('https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=nl&q=' + encodeURIComponent(text.slice(0, 190)));
-    audioEl.playbackRate = Math.max(0.6, Math.min(1.2, rate || S.settings.rate));
-    return audioEl.play();
-  } catch { return Promise.reject(); }
+// One shared <audio> element, "unlocked" by the first tap so iPhone allows later playback.
+const player = new Audio();
+player.preload = 'auto';
+let playerUrl = '';
+let unlocked = false;
+const SILENT = (() => { // 50 ms of silence as a WAV file
+  const n = 400, buf = new ArrayBuffer(44 + n), v = new DataView(buf);
+  const w = (o, s) => [...s].forEach((ch, i) => v.setUint8(o + i, ch.charCodeAt(0)));
+  w(0, 'RIFF'); v.setUint32(4, 36 + n, true); w(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 8000, true); v.setUint32(28, 8000, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true); w(36, 'data'); v.setUint32(40, n, true);
+  for (let i = 0; i < n; i++) v.setUint8(44 + i, 128);
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+})();
+function unlockAudio() {
+  if (unlocked) return;
+  unlocked = true;
+  try { player.src = SILENT; const p = player.play(); if (p && p.catch) p.catch(() => {}); } catch {}
 }
-function speak(text, rate) {
-  if (!text) return;
-  if ((!nlVoice || !('speechSynthesis' in window)) && navigator.onLine) {
-    const p = speakOnline(text, rate);
-    if (p && p.catch) p.catch(() => speakLocal(text, rate));
-    return;
+addEventListener('pointerdown', unlockAudio, { once: true, capture: true });
+
+function playUrl(url, rate) {
+  try {
+    player.pause();
+    if (playerUrl.startsWith('blob:') && playerUrl !== url) URL.revokeObjectURL(playerUrl);
+    playerUrl = url;
+    player.src = url;
+    player.playbackRate = Math.max(0.5, Math.min(1.5, rate || S.settings.rate));
+    return player.play();
+  } catch (e) { return Promise.reject(e); }
+}
+
+// ---- ElevenLabs (premium voice). Audio is cached on the device, so each word costs credits only once.
+const elCacheKey = (text) => `${S.settings.elVoice}|${S.settings.elModel}|${text}`;
+const elReady = () => S.settings.voiceEngine === 'elevenlabs' && S.elKey && S.settings.elVoice;
+const elInflight = new Map();
+
+async function elFetch(text) {
+  const key = elCacheKey(text);
+  try { const hit = await db.getAudio(key); if (hit) return hit; } catch {}
+  if (elInflight.has(key)) return elInflight.get(key);
+  const p = (async () => {
+    const model = S.settings.elModel;
+    const body = { text, model_id: model };
+    if (/flash|turbo/.test(model)) body.language_code = 'nl'; // forces Dutch pronunciation
+    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(S.settings.elVoice)}?output_format=mp3_44100_128`, {
+      method: 'POST',
+      headers: { 'xi-api-key': S.elKey, 'Content-Type': 'application/json', Accept: 'audio/mpeg' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      let msg = 'HTTP ' + r.status;
+      try { const j = await r.json(); msg = (j.detail && (j.detail.message || j.detail.status)) || msg; } catch {}
+      throw new Error(msg);
+    }
+    const blob = await r.blob();
+    db.setAudio(key, blob).catch(() => {});
+    return blob;
+  })();
+  elInflight.set(key, p);
+  try { return await p; } finally { elInflight.delete(key); }
+}
+
+let elErrorShown = 0;
+async function speakEleven(text, rate) {
+  try {
+    const blob = await elFetch(text);
+    await playUrl(URL.createObjectURL(blob), rate);
+    return true;
+  } catch (e) {
+    if (e && e.name === 'NotAllowedError') return true; // autoplay blocked — tap the speaker
+    if (Date.now() - elErrorShown > 15000) { elErrorShown = Date.now(); toast(`ElevenLabs: ${esc(e.message || 'failed')} — using the free voice`); }
+    return false;
   }
-  speakLocal(text, rate);
+}
+
+/** Prefetch premium audio for a word so it also plays offline later. */
+function prefetchAudio(c) {
+  if (elReady() && navigator.onLine) elFetch(cardSpeech(c)).catch(() => {});
+}
+
+// ---- Free voices
+function speakGoogle(text, rate) {
+  // needs <meta name="referrer" content="no-referrer"> — Google rejects requests from other sites
+  return playUrl('https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=nl&q=' + encodeURIComponent(text.slice(0, 190)), rate);
+}
+const goodLocalVoice = () => nlVoice && /google|xander|claire|ellen|fleur|natural|premium|enhanced|siri/i.test(nlVoice.name);
+
+async function speak(text, rate) {
+  if (!text) return;
+  if (elReady() && (await speakEleven(text, rate))) return;
+  if (goodLocalVoice() || (!navigator.onLine && nlVoice)) { speakLocal(text, rate); return; }
+  if (navigator.onLine) {
+    try { await speakGoogle(text, rate); return; } catch (e) { if (e && e.name === 'NotAllowedError') return; }
+  }
+  if (nlVoice) { speakLocal(text, rate); return; }
+  // Never read Dutch with an English voice — that teaches the wrong pronunciation.
+  toast('No Dutch voice available offline on this device');
 }
 function speakLocal(text, rate) {
-  if (!('speechSynthesis' in window)) return;
+  if (!('speechSynthesis' in window) || !nlVoice) return;
   try {
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
@@ -179,7 +295,8 @@ function speakLocal(text, rate) {
     speechSynthesis.speak(u);
   } catch {}
 }
-const speakCard = (c) => speak((c.article && c.article !== 'de/het' ? c.article + ' ' : '') + c.word);
+const cardSpeech = (c) => (c.article && c.article !== 'de/het' ? c.article + ' ' : '') + c.word;
+const speakCard = (c) => speak(cardSpeech(c));
 
 // ───────────────────────── toast ─────────────────────────
 let toastT = 0;
@@ -290,6 +407,10 @@ function softRefresh() {
 
 function afterRender() {
   if (S.tab === 'words') renderWordList();
+  if (S.tab === 'settings' && S.elKey && S.settings.voiceEngine === 'elevenlabs') {
+    if (!S.elVoices) { S.elVoices = []; loadVoices(); }
+    loadUsage();
+  }
 }
 
 // ── Home
@@ -435,7 +556,10 @@ function rowHtml(c) {
   let sub;
   if (c.status === 'pending' && !c.translation) sub = `<span class="pending"><i class="spinner"></i> Translating…</span>`;
   else if (c.status === 'failed' && !c.translation) sub = `<span class="failed">Tap to add a translation</span>`;
-  else sub = `<span ${dirAttr(c.lang)}>${esc(c.translation)}</span>`;
+  else {
+    const x = extraTr(c);
+    sub = `<span ${dirAttr(c.lang)}>${esc(c.translation)}</span>${x ? `<span class="sub2"> · </span><span class="sub2" ${dirAttr(x.lang)}>${esc(x.text)}</span>` : ''}`;
+  }
   return `
     <button class="row" data-action="open-detail" data-id="${c.id}">
       <div class="row-main">
@@ -482,7 +606,7 @@ function renderWordList() {
   const q = norm(S.words.q);
   const f = S.words.filter;
   let arr = [...S.cards.values()].filter((c) => {
-    if (q && !norm(c.word).includes(q) && !norm(c.translation).includes(q) && !norm(c.note).includes(q)) return false;
+    if (q && !norm(c.word).includes(q) && !norm(c.translation).includes(q) && !norm(c.note).includes(q) && !norm(Object.values(c.translations || {}).join(' ')).includes(q)) return false;
     const st = cardStatus(c);
     if (f === 'new') return st === 'new';
     if (f === 'learning') return st === 'learning' || st === 'review';
@@ -584,6 +708,10 @@ function viewSettings() {
         <div><b>Translate into</b><span>Used for new words you add</span></div>
         <select data-setting="lang">${langOpts}</select>
       </div>
+      <div class="set-row">
+        <div><b>Also show</b><span>A second translation on every card${s.lang2 ? ' — added to existing words automatically' : ''}</span></div>
+        <select data-setting="lang2"><option value="" ${!s.lang2 ? 'selected' : ''}>None</option>${Object.entries(LANGS).filter(([k]) => k !== s.lang).map(([k, v]) => `<option value="${k}" ${s.lang2 === k ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}</select>
+      </div>
       ${failed ? `<div class="set-row"><div><b>${failed} word${failed > 1 ? 's' : ''} without translation</b><span>Try fetching them again</span></div><button class="btn btn-sm btn-soft" data-action="retry-failed">Retry</button></div>` : ''}
     </div>
 
@@ -612,7 +740,12 @@ function viewSettings() {
         <div class="row-between"><b>Speaking speed</b><button class="btn btn-sm btn-soft" data-action="test-voice">${icon('volume', 16)} Test</button></div>
         <input type="range" min="0.5" max="1.2" step="0.05" value="${s.rate}" data-setting="rate">
       </div>
-      <div class="set-row"><div><span>${nlVoice ? `Voice: ${esc(nlVoice.name)} (works offline)` : 'Using Google’s online Dutch voice. For offline audio, install a Dutch voice (Android: Google Text-to-speech → Dutch; iPhone: built in).'}</span></div></div>
+      <div class="set-row col">
+        <div><b>Voice</b><span>ElevenLabs sounds like a real Dutch speaker. Each word is generated once and saved on your phone.</span></div>
+        ${seg('voiceEngine', [['free', 'Free'], ['elevenlabs', 'ElevenLabs']])}
+      </div>
+      ${s.voiceEngine === 'elevenlabs' ? elevenSettingsHtml(seg) : `
+      <div class="set-row"><div><span>${goodLocalVoice() ? `Using your device's Dutch voice: ${esc(nlVoice.name)} (works offline)` : 'Using Google’s free online Dutch voice.'}</span></div></div>`}
     </div>
 
     <div class="group-label">Appearance</div>
@@ -637,6 +770,66 @@ function viewSettings() {
 
     <p class="credits">Translations by Google Translate &amp; MyMemory · Dictionary data from Wiktionary (CC BY-SA) · Example sentences from Tatoeba (CC BY 2.0 FR) · Scheduling by FSRS.<br>Succes met je inburgering! 🇳🇱</p>
   `;
+}
+
+function elevenSettingsHtml(seg) {
+  const s = S.settings;
+  const voices = S.elVoices;
+  let voiceRow = '';
+  if (S.elKey && voices && voices.length) {
+    voiceRow = `<div class="set-row">
+      <div><b>Speaker</b><span>Your own (cloned) voices are listed first</span></div>
+      <select data-setting="elVoice">${voices.map((v) => `<option value="${esc(v.voice_id)}" ${v.voice_id === s.elVoice ? 'selected' : ''}>${esc(v.name)}${/cloned|professional/.test(v.category) ? ' ★ yours' : ''}</option>`).join('')}</select>
+    </div>`;
+  } else if (S.elKey) {
+    voiceRow = `<div class="set-row col">
+      <div><b>Speaker</b><span>${s.elVoiceName ? 'Current: ' + esc(s.elVoiceName) : 'Load your voices, or paste a voice ID'}</span></div>
+      <div class="key-row"><input id="el-voice-id" placeholder="Voice ID" value="${esc(s.elVoice)}" autocomplete="off" autocapitalize="none" spellcheck="false"><button class="btn btn-sm btn-soft" data-action="el-save-voice">Use</button><button class="btn btn-sm btn-soft" data-action="el-load-voices">Load list</button></div>
+    </div>`;
+  }
+  return `
+    <div class="set-row col">
+      <div><b>ElevenLabs API key</b><span>Stored only on this phone and never included in backups.</span></div>
+      <div class="key-row"><input id="el-key" type="password" placeholder="${S.elKey ? '•••••••• saved' : 'Paste your API key'}" autocomplete="off" autocapitalize="none" spellcheck="false"><button class="btn btn-sm btn-primary" data-action="el-save-key">${S.elKey ? 'Replace' : 'Save'}</button></div>
+    </div>
+    ${voiceRow}
+    ${S.elKey ? `
+    <div class="set-row col">
+      <div><b>Model</b><span>Flash v2.5 forces Dutch pronunciation and uses half the credits. Multilingual v2 sounds most natural.</span></div>
+      ${seg('elModel', [['eleven_flash_v2_5', 'Flash v2.5'], ['eleven_multilingual_v2', 'Multilingual v2']])}
+    </div>
+    <div class="set-row"><div><span id="el-usage">Checking credits…</span></div><button class="btn btn-sm btn-soft" data-action="el-clear-cache">Clear saved audio</button></div>` : ''}`;
+}
+
+async function loadVoices() {
+  try {
+    const r = await fetch('https://api.elevenlabs.io/v1/voices', { headers: { 'xi-api-key': S.elKey } });
+    if (!r.ok) throw new Error(r.status === 401 ? 'the key was rejected or lacks the “Voices: read” permission' : 'HTTP ' + r.status);
+    const j = await r.json();
+    const order = { cloned: 0, professional: 0, generated: 1, premade: 2 };
+    S.elVoices = (j.voices || []).sort((a, b) => (order[a.category] ?? 3) - (order[b.category] ?? 3) || a.name.localeCompare(b.name));
+    if (!S.elVoices.some((v) => v.voice_id === S.settings.elVoice) && S.elVoices[0]) {
+      S.settings.elVoice = S.elVoices[0].voice_id; S.settings.elVoiceName = S.elVoices[0].name; saveSettings();
+    }
+  } catch (e) {
+    S.elVoices = [];
+    toast('Could not load voices: ' + esc(e.message));
+  }
+  if (S.tab === 'settings' && !S.session) render(true);
+}
+
+async function loadUsage() {
+  if (!$('#el-usage')) return;
+  let text;
+  try {
+    const r = await fetch('https://api.elevenlabs.io/v1/user/subscription', { headers: { 'xi-api-key': S.elKey } });
+    if (!r.ok) throw 0;
+    const j = await r.json();
+    const left = Math.max(0, (j.character_limit || 0) - (j.character_count || 0));
+    text = `${left.toLocaleString()} credits left this month (a word uses ~5–10)`;
+  } catch { text = 'Audio is saved on this phone after the first play.'; }
+  const el = $('#el-usage'); // look it up again: the page may have re-rendered meanwhile
+  if (el) el.textContent = text;
 }
 
 // ───────────────────────── sheet (bottom drawer) ─────────────────────────
@@ -712,7 +905,16 @@ function onAddInput() {
     try {
       const r = await lookup(input, S.settings.lang);
       if (!S.add || seq !== S.add.seq) return;
-      a.result = r; a.error = ''; a.translation = r.translation;
+      a.result = r; a.error = ''; a.translation = r.translation; a.extra = '';
+      const l2 = S.settings.lang2;
+      if (l2 && l2 !== S.settings.lang) {
+        translateTerm(r.word, r.article, l2).then((t) => {
+          if (!S.add || seq !== S.add.seq) return;
+          a.extra = t;
+          const el = $('#add-extra');
+          if (el) { el.textContent = t; el.classList.remove('sk'); }
+        }).catch(() => { const el = $('#add-extra'); if (el) el.remove(); });
+      }
     } catch (e) {
       if (!S.add || seq !== S.add.seq) return;
       a.result = null;
@@ -761,6 +963,7 @@ function renderAddPreview() {
       <div class="pv-word">${art ? `<span class="pv-art a-${art}">${art}</span>` : ''}${esc(r.word)}</div>
       ${meta ? `<div class="pv-meta">${esc(meta)}</div>` : ''}
       <input id="add-translation" class="pv-input big" value="${esc(a.translation)}" ${dirAttr(S.settings.lang)} aria-label="Translation">
+      ${S.settings.lang2 && S.settings.lang2 !== S.settings.lang ? `<div id="add-extra" class="pv-tr2 ${a.extra ? '' : 'sk'}" ${dirAttr(S.settings.lang2)}>${esc(a.extra || '')}</div>` : ''}
       ${altTerms.length ? `<div class="alt-chips">${altTerms.map((t) => `<button class="chip" data-action="use-alt" data-t="${esc(t)}" ${dirAttr(S.settings.lang)}>${esc(t)}</button>`).join('')}</div>` : ''}
       ${def && S.settings.lang !== 'en' ? `<div class="pv-def"><small>${esc(def.pos)}</small> ${esc(def.items[0])}</div>` : ''}
       ${def && S.settings.lang === 'en' && def.items[0] && norm(def.items[0]) !== norm(a.translation) ? `<div class="pv-def"><small>${esc(def.pos)}</small> ${esc(def.items.slice(0, 2).join('; '))}</div>` : ''}
@@ -792,12 +995,13 @@ async function saveWord() {
     applyLookup(c, r);
     c.article = art;
     if (translation) { c.userEdited = norm(translation) !== norm(r.translation); c.translation = translation; }
+    if (a.extra && S.settings.lang2) c.translations = { [S.settings.lang2]: a.extra };
   } else if (translation) {
     c.translation = translation; c.userEdited = true; c.status = 'pending'; // still fetch extras
   }
   // reset for the next word right away (before any await) — keep sheet open for rapid entry
   clearTimeout(addT);
-  S.add = { ...S.add, input: '', result: null, loading: false, error: '', translation: '', note: '', article: null, seq: a.seq + 1 };
+  S.add = { ...S.add, input: '', result: null, loading: false, error: '', translation: '', extra: '', note: '', article: null, seq: a.seq + 1 };
   const inp = $('#add-input'); inp.value = ''; inp.focus();
   renderAddPreview();
   S.cards.set(c.id, c);
@@ -805,7 +1009,8 @@ async function saveWord() {
   vibrate(12);
   toast(`Added <b>${esc(word)}</b>`, { action: 'Undo', onAction: async () => { S.cards.delete(c.id); await db.deleteCard(c.id); today().a = Math.max(0, today().a - 1); saveStats(); softRefresh(); } });
   await saveCard(c);
-  if (c.status === 'pending') processPending();
+  prefetchAudio(c);
+  if (c.status === 'pending' || needsExtra(c)) processPending();
 }
 
 async function bulkAdd() {
@@ -857,6 +1062,7 @@ function detailHtml(c) {
     </div>
     <div class="d-meta">${[c.pos, c.plural ? `mv. ${c.plural}` : ''].filter(Boolean).map((x) => `<span class="chip static">${esc(x)}</span>`).join('')}</div>
     <div class="d-translation" ${dirAttr(c.lang)}>${c.status === 'pending' && !c.translation ? '<span class="pending"><i class="spinner"></i> Translating…</span>' : esc(c.translation) || '<span class="muted">No translation yet</span>'}</div>
+    ${extraHtml(c, 'd-translation2')}
     ${c.note ? `<div class="d-note">${esc(c.note)}</div>` : ''}
 
     ${alts.length ? `<div class="d-section"><h4>Other meanings</h4>${alts.map((a) => `<p ${dirAttr(c.lang)}>${a.pos ? `<small>${esc(a.pos)}</small> ` : ''}${a.terms.map(esc).join(', ')}</p>`).join('')}</div>` : ''}
@@ -897,6 +1103,7 @@ function editHtml(c) {
       <label>Dutch<input name="word" value="${esc(c.word)}" lang="nl" autocomplete="off" autocapitalize="none" spellcheck="false" required></label>
       <label>Article<div class="art-seg wide">${['', 'de', 'het', 'de/het'].map((x) => `<button type="button" class="${art === x ? 'on' : ''} ${x === 'de' || x === 'het' ? 'a-' + x : ''}" data-action="form-art" data-v="${x}">${x || 'none'}</button>`).join('')}</div><input type="hidden" name="article" value="${esc(art)}"></label>
       <label>Translation<input name="translation" value="${esc(c.translation)}" ${dirAttr(c.lang)} autocomplete="off"></label>
+      ${S.settings.lang2 && S.settings.lang2 !== c.lang ? `<label>${esc((LANGS[S.settings.lang2] || {}).name || S.settings.lang2)}<input name="translation2" value="${esc((c.translations || {})[S.settings.lang2] || '')}" ${dirAttr(S.settings.lang2)} autocomplete="off"></label>` : ''}
       <div class="form-2">
         <label>Plural<input name="plural" value="${esc(c.plural)}" lang="nl" autocomplete="off" autocapitalize="none"></label>
         <label>Type<input name="pos" value="${esc(c.pos)}" placeholder="noun, verb…" autocomplete="off"></label>
@@ -968,6 +1175,9 @@ function nextCard() {
   const c = S.cards.get(item.id);
   const shouldSpeak = item.dir === 'listen' || (S.settings.autoplay && item.dir === 'nl');
   if (shouldSpeak) setTimeout(() => speakCard(c), 250);
+  // warm the premium-voice cache for the next card so it plays instantly
+  const nxt = se.queue[0] && S.cards.get(se.queue[0].id);
+  if (nxt) prefetchAudio(nxt);
 }
 
 function sessionProgress() {
@@ -995,7 +1205,7 @@ function renderSessionCard(opts = {}) {
   } else if (dir === 'listen') {
     front = `<button class="listen-btn" data-action="speak-card" data-id="${c.id}" aria-label="Play again">${icon('headphones', 44)}</button><div class="c-hint">What does it mean?</div>`;
   } else {
-    front = `<div class="c-prompt">How do you say…</div><div class="c-word c-tr" ${dirAttr(lang)}>${esc(c.translation)}</div>
+    front = `<div class="c-prompt">How do you say…</div><div class="c-word c-tr" ${dirAttr(lang)}>${esc(c.translation)}</div>${extraHtml(c, 'b-tr2')}
       ${c.pos ? `<div class="c-hint">${esc(c.pos)}${c.pos === 'noun' && c.article ? ' · include de/het' : ''}</div>` : ''}`;
   }
 
@@ -1005,6 +1215,7 @@ function renderSessionCard(opts = {}) {
       <button class="icon-btn" data-action="speak-card" data-id="${c.id}" aria-label="Pronounce">${icon('volume', 20)}</button></div>
     ${[c.pos, c.plural ? `mv. ${c.plural}` : ''].filter(Boolean).length ? `<div class="b-meta">${esc([c.pos, c.plural ? `mv. ${c.plural}` : ''].filter(Boolean).join(' · '))}</div>` : ''}
     <div class="b-tr" ${dirAttr(lang)}>${esc(c.translation)}</div>
+    ${extraHtml(c, 'b-tr2')}
     ${se.typed ? typedFeedback(se.typed) : ''}
     ${ex ? `<div class="b-ex"><p lang="nl">${highlight(ex.nl, c.word)}</p><p ${dirAttr(lang)}>${esc(ex.tr)}</p></div>` : ''}
     ${c.note ? `<div class="b-note">${esc(c.note)}</div>` : ''}`;
@@ -1427,7 +1638,7 @@ document.addEventListener('click', async (e) => {
     }
     case 'refetch': {
       const c = S.cards.get(id); el.disabled = true; el.innerHTML = `<i class="spinner"></i> Fetching…`;
-      try { const r = await lookup((c.article ? c.article + ' ' : '') + c.word, S.settings.lang); c.userEdited = false; c.translation = ''; applyLookup(c, r); await saveCard(c); toast('Updated'); }
+      try { const r = await lookup((c.article ? c.article + ' ' : '') + c.word, S.settings.lang); c.userEdited = false; c.translation = ''; applyLookup(c, r); c.translations = {}; c.xTries = 0; await saveCard(c); toast('Updated'); processPending(); }
       catch { toast(navigator.onLine ? 'No translation found' : 'You are offline'); }
       refreshDetail(); break;
     }
@@ -1454,9 +1665,26 @@ document.addEventListener('click', async (e) => {
     case 'seg': {
       const k = el.dataset.key; let v = el.dataset.v; if (k === 'retention') v = +v;
       S.settings[k] = v; saveSettings(); $$('button', el.parentElement).forEach((b) => b.classList.toggle('on', b === el));
-      if (k === 'theme') applyTheme(); break;
+      if (k === 'theme') applyTheme();
+      if (k === 'voiceEngine') render(true);
+      if (k === 'elModel') speak('Goedemorgen! Hoe gaat het met je?');
+      break;
     }
     case 'test-voice': speak('Goedemorgen! Hoe gaat het met je?'); break;
+    case 'el-save-key': {
+      const v = ($('#el-key').value || '').trim();
+      if (!v) { toast('Paste your ElevenLabs API key first'); break; }
+      S.elKey = v; await db.setMeta('elKey', v);
+      S.elVoices = null; toast('API key saved on this phone'); render(true);
+      break;
+    }
+    case 'el-load-voices': S.elVoices = null; render(true); break;
+    case 'el-save-voice': {
+      const v = ($('#el-voice-id').value || '').trim(); if (!v) break;
+      S.settings.elVoice = v; S.settings.elVoiceName = v; saveSettings(); speak('Goedemorgen! Hoe gaat het met je?'); render(true);
+      break;
+    }
+    case 'el-clear-cache': await db.clearAudio().catch(() => {}); toast('Saved audio cleared'); break;
     case 'add-pack': el.disabled = true; addPack(el.dataset.pack); break;
     case 'retry-failed': {
       for (const c of S.cards.values()) if (c.status === 'failed') { c.status = 'pending'; c.tries = 0; await saveCard(c); }
@@ -1491,8 +1719,16 @@ document.addEventListener('change', (e) => {
     if (t.type === 'checkbox') S.settings[k] = t.checked;
     else if (k === 'rate') S.settings[k] = +t.value;
     else S.settings[k] = t.value;
+    if (k === 'elVoice') { S.settings.elVoiceName = (t.selectedOptions[0] || {}).textContent || ''; speak('Goedemorgen! Hoe gaat het met je?'); }
+    if (k === 'lang' && S.settings.lang2 === S.settings.lang) S.settings.lang2 = '';
     saveSettings();
-    if (k === 'lang') render();
+    if (k === 'lang') render(true);
+    if (k === 'lang2') {
+      render(true);
+      const n = [...S.cards.values()].filter(needsExtra).length;
+      if (n) toast(`Adding ${esc((LANGS[S.settings.lang2] || {}).name || '')} to ${n} word${n > 1 ? 's' : ''}…`);
+      processPending();
+    }
     if (k === 'rate') speak('Goed zo', S.settings.rate);
   }
 });
@@ -1513,6 +1749,7 @@ document.addEventListener('submit', async (e) => {
     if (tr !== c.translation) c.userEdited = true;
     Object.assign(c, { word: fd.get('word').trim() || c.word, article: fd.get('article'), translation: tr, plural: fd.get('plural').trim(), pos: fd.get('pos').trim(), note: fd.get('note').trim() });
     if (c.translation) c.status = 'ok';
+    if (fd.has('translation2')) c.translations = { ...(c.translations || {}), [S.settings.lang2]: fd.get('translation2').trim() };
     await saveCard(c);
     toast('Saved');
     $('#sheet-body').innerHTML = detailHtml(c);
@@ -1577,7 +1814,8 @@ function applyTheme() {
 // ───────────────────────── boot ─────────────────────────
 async function boot() {
   try {
-    const [cards, settings, stats] = await Promise.all([db.allCards(), db.getMeta('settings'), db.getMeta('stats')]);
+    const [cards, settings, stats, elKey] = await Promise.all([db.allCards(), db.getMeta('settings'), db.getMeta('stats'), db.getMeta('elKey')]);
+    S.elKey = elKey || '';
     for (const c of cards || []) S.cards.set(c.id, c);
     S.settings = { ...DEFAULT_SETTINGS, ...(settings || {}) };
     S.stats = stats && stats.days ? stats : { days: {} };
@@ -1616,14 +1854,16 @@ addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); S.deferredI
 addEventListener('appinstalled', () => { S.deferredInstall = null; toast('Woordje installed 🎉'); });
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-  navigator.serviceWorker.register('./sw.js').then((reg) => {
-    reg.addEventListener('updatefound', () => {
-      const nw = reg.installing;
-      nw && nw.addEventListener('statechange', () => {
-        if (nw.state === 'installed' && navigator.serviceWorker.controller) toast('A new version is ready', { action: 'Reload', ms: 10000, onAction: () => location.reload() });
-      });
-    });
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then((reg) => {
+    // check for updates whenever the app comes back to the foreground
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
   }).catch(() => {});
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) return;
+    if (S.session || $('#session.open')) return; // don't interrupt a review
+    toast('Woordje was updated ✨', { action: 'Reload', ms: 10000, onAction: () => location.reload() });
+  });
 }
 
 boot();

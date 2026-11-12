@@ -213,6 +213,14 @@ export async function examples(word, tl = 'en') {
   }
 }
 
+/** Short translation of a word into an extra language (e.g. Persian next to English). */
+export async function translateTerm(word, article, tl) {
+  const r = await translate(article && article !== 'de/het' ? `${article} ${word}` : word, tl);
+  let t = r.main;
+  if (tl === 'en') t = t.replace(/^(the|a|an) (?=\w)/i, '');
+  return t;
+}
+
 /**
  * Full lookup used when adding a word. Resolves even if some sources fail.
  * Throws only if no translation at all could be found.

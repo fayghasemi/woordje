@@ -1,6 +1,6 @@
 // Tiny IndexedDB persistence layer. Everything is also kept in memory for speed.
 const DB_NAME = 'woordje';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let dbp = null;
 
 function open() {
@@ -11,6 +11,7 @@ function open() {
       const db = req.result;
       if (!db.objectStoreNames.contains('cards')) db.createObjectStore('cards', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
+      if (!db.objectStoreNames.contains('audio')) db.createObjectStore('audio');
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -56,6 +57,15 @@ export const db = {
   },
   async setMeta(key, value) {
     return tx('meta', 'readwrite', (s) => { s.put(value, key); });
+  },
+  async getAudio(key) {
+    return tx('audio', 'readonly', (s) => reqP(s.get(key)));
+  },
+  async setAudio(key, blob) {
+    return tx('audio', 'readwrite', (s) => { s.put(blob, key); });
+  },
+  async clearAudio() {
+    return tx('audio', 'readwrite', (s) => { s.clear(); });
   },
 };
 
