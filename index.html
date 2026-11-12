@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Woordje — Dutch flashcards</title>
+  <meta name="description" content="Collect Dutch words as you meet them and remember them forever. Built for the inburgering exam.">
+  <meta name="theme-color" content="#F5F4F0">
+  <meta name="color-scheme" content="light dark">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Woordje">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="icons/icon-192.png" sizes="192x192" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="app">
+    <main id="view" tabindex="-1"></main>
+    <nav class="tabbar" aria-label="Main">
+      <button class="tab" data-tab="home" aria-label="Home"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V20a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V9.5"/></svg><span>Today</span></button>
+      <button class="tab" data-tab="words" aria-label="Words"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></svg><span>Words</span></button>
+      <button class="tab tab-add" data-tab="add" aria-label="Add word"><i><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></i></button>
+      <button class="tab" data-tab="practice" aria-label="Practice"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="14" height="15" rx="2.5"/><path d="M7 3h11.5A2.5 2.5 0 0 1 21 5.5V17"/></svg><span>Practice</span></button>
+      <button class="tab" data-tab="settings" aria-label="Settings"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg><span>Settings</span></button>
+    </nav>
+  </div>
+
+  <div id="scrim" class="scrim"></div>
+  <section id="sheet" class="sheet" role="dialog" aria-modal="true">
+    <div id="sheet-grab" class="sheet-grab"><i></i></div>
+    <div id="sheet-body" class="sheet-body"></div>
+  </section>
+
+  <section id="session" class="session" aria-live="polite"></section>
+  <div id="toast" class="toast" role="status"></div>
+
+  <noscript>Woordje needs JavaScript to run.</noscript>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

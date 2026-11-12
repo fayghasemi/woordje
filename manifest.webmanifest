@@ -1,0 +1,29 @@
+{
+  "name": "Woordje — Dutch flashcards",
+  "short_name": "Woordje",
+  "description": "Collect Dutch words as you meet them and remember them with smart spaced repetition. Built for the inburgering exam.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F5F4F0",
+  "theme_color": "#1D3A8A",
+  "lang": "en",
+  "categories": ["education", "productivity"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "shortcuts": [
+    { "name": "Add a word", "short_name": "Add", "url": "./?add=", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Start review", "short_name": "Review", "url": "./?review", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] }
+  ],
+  "share_target": {
+    "action": "./",
+    "method": "GET",
+    "params": { "title": "title", "text": "text", "url": "url" }
+  }
+}
