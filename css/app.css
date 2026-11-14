@@ -543,6 +543,14 @@ body.in-session .toast { bottom: calc(var(--safe-b) + 110px); }
 .icon-btn.mic.listening { background: var(--again); color: #fff; animation: micPulse 1.2s ease-in-out infinite; }
 @keyframes micPulse { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--again) 45%, transparent); } 50% { box-shadow: 0 0 0 10px transparent; } }
 
+.form textarea { color: var(--text); font-weight: 500; }
+.form-2 > label { min-width: 0; }
+.form-2 input { width: 100%; min-width: 0; }
+.note-field { display: flex; gap: 6px; align-items: flex-start; }
+.note-field textarea { flex: 1; min-width: 0; }
+.note-field .icon-btn { margin-top: 8px; background: var(--surface-2); }
+.note-field .icon-btn.listening { background: var(--again); }
+
 /* multiple meanings */
 .alt-label { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: -4px; }
 .alt-chips .chip.on { background: var(--brand); border-color: var(--brand); color: #fff; }

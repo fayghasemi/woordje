@@ -4,7 +4,7 @@ import { lookup, parseInput, translateTerm, LANGS, RTL } from './lookup.js';
 import { PACKS, BUILTIN_NOUNS } from './starter.js';
 import { icon } from './icons.js';
 
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 
 // ───────────────────────── helpers ─────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
@@ -846,6 +846,7 @@ function openSheet(html, opts = {}) {
   S.onSheetClose = opts.onClose || null;
 }
 function closeSheet() {
+  if (recog) recog.abort();
   const sheet = $('#sheet');
   if (!sheet.classList.contains('open')) return;
   sheet.classList.remove('open');
@@ -892,12 +893,16 @@ function addHtml() {
     </div>`;
 }
 
-// ── Voice input: say a Dutch word, it is typed into the Add field
+// ── Voice input (Dutch). A mic button's data-target names the field to fill:
+//    the Add field gets a single word; note fields get whole sentences appended.
 let recog = null;
 function dictate(btn) {
   if (recog) { recog.stop(); return; }
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const inp = $('#add-input');
+  const targetId = btn.dataset.target || 'add-input';
+  const inp = document.getElementById(targetId);
+  if (!inp) return;
+  const wordMode = targetId === 'add-input';
   if (!SR) {
     inp.focus();
     toast(isIOS() ? 'Tap the 🎤 on your keyboard to dictate (switch the keyboard to Dutch first)' : 'Voice input isn’t supported in this browser — use the 🎤 on your keyboard', { ms: 5000 });
@@ -910,14 +915,22 @@ function dictate(btn) {
   r.maxAlternatives = 1;
   recog = r;
   btn.classList.add('listening');
-  inp.placeholder = 'Luisteren… zeg een woord';
+  const oldPlaceholder = inp.placeholder;
+  inp.placeholder = wordMode ? 'Luisteren… zeg een woord' : 'Luisteren… zeg de zin';
+  const base = wordMode ? '' : inp.value.trim();
   let finalText = '';
   r.onresult = (e) => {
     let t = '';
     for (const res of e.results) t += res[0].transcript;
-    t = t.trim().replace(/[.!?。]+$/, '');
-    if (t && t === t[0].toUpperCase() + t.slice(1) && !/^[A-Z]{2,}/.test(t)) t = t[0].toLowerCase() + t.slice(1); // "Fiets" -> "fiets"
-    inp.value = t;
+    t = t.trim();
+    if (wordMode) {
+      t = t.replace(/[.!?。]+$/, '');
+      if (t && t === t[0].toUpperCase() + t.slice(1) && !/^[A-Z]{2,}/.test(t)) t = t[0].toLowerCase() + t.slice(1); // "Fiets" -> "fiets"
+      inp.value = t;
+    } else {
+      if (t) t = t[0].toUpperCase() + t.slice(1);
+      inp.value = base ? `${base} ${t}` : t;
+    }
     if (e.results[e.results.length - 1].isFinal) finalText = t;
   };
   r.onerror = (e) => {
@@ -927,10 +940,11 @@ function dictate(btn) {
   r.onend = () => {
     recog = null;
     btn.classList.remove('listening');
-    inp.placeholder = 'bijv. de gemeente';
-    if (finalText || inp.value) { onAddInput(); vibrate(10); }
+    inp.placeholder = oldPlaceholder;
+    if (wordMode) { if (finalText || inp.value) { onAddInput(); vibrate(10); } }
+    else if (finalText) { inp.dispatchEvent(new Event('input', { bubbles: true })); vibrate(10); }
   };
-  try { r.start(); vibrate(8); } catch { recog = null; btn.classList.remove('listening'); }
+  try { r.start(); vibrate(8); } catch { recog = null; btn.classList.remove('listening'); inp.placeholder = oldPlaceholder; }
 }
 
 let addT = 0;
@@ -1013,7 +1027,7 @@ function renderAddPreview() {
       ${def && S.settings.lang !== 'en' ? `<div class="pv-def"><small>${esc(def.pos)}</small> ${esc(def.items[0])}</div>` : ''}
       ${def && S.settings.lang === 'en' && def.items[0] && norm(def.items[0]) !== norm(a.translation) ? `<div class="pv-def"><small>${esc(def.pos)}</small> ${esc(def.items.slice(0, 2).join('; '))}</div>` : ''}
       ${ex ? `<div class="pv-ex"><p lang="nl">${highlight(ex.nl, r.word)}</p><p class="muted" ${dirAttr(S.settings.lang)}>${esc(ex.tr)}</p></div>` : ''}
-      <details class="pv-note" ${a.note ? 'open' : ''}><summary>Add a note or the sentence where you saw it</summary><textarea id="add-note" rows="2" placeholder="e.g. Ik heb een afspraak bij de gemeente.">${esc(a.note)}</textarea></details>
+      <details class="pv-note" ${a.note ? 'open' : ''}><summary>Add a note or the sentence where you saw it</summary><div class="note-field"><textarea id="add-note" rows="2" lang="nl" placeholder="e.g. Ik heb een afspraak bij de gemeente.">${esc(a.note)}</textarea><button type="button" class="icon-btn mic" data-action="dictate" data-target="add-note" aria-label="Say the sentence">${icon('mic', 20)}</button></div></details>
     </div>
     <button class="btn btn-primary btn-block" data-action="save-word">${icon('plus', 18)} Add to my words</button>`;
 }
@@ -1165,7 +1179,7 @@ function editHtml(c) {
         <label>Plural<input name="plural" value="${esc(c.plural)}" lang="nl" autocomplete="off" autocapitalize="none"></label>
         <label>Type<input name="pos" value="${esc(c.pos)}" placeholder="noun, verb…" autocomplete="off"></label>
       </div>
-      <label>Note<textarea name="note" rows="3">${esc(c.note)}</textarea></label>
+      <label>Note or example sentence<div class="note-field"><textarea name="note" id="edit-note" rows="3" lang="nl">${esc(c.note)}</textarea><button type="button" class="icon-btn mic" data-action="dictate" data-target="edit-note" aria-label="Say the sentence">${icon('mic', 20)}</button></div></label>
       <button class="btn btn-primary btn-block" type="submit">${icon('check', 18)} Save</button>
     </form>`;
 }
