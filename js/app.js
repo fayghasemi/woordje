@@ -4,7 +4,7 @@ import { lookup, parseInput, translateTerm, LANGS, RTL } from './lookup.js';
 import { PACKS, BUILTIN_NOUNS } from './starter.js';
 import { icon } from './icons.js';
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 
 // ───────────────────────── helpers ─────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
@@ -860,7 +860,7 @@ function closeSheet() {
 // ── Add word
 function openAdd(prefill = '') {
   S.add = { input: prefill, result: null, loading: false, error: '', translation: '', translationTouched: false, article: null, note: '', bulk: false, seq: 0 };
-  openSheet(addHtml(), { onClose: () => { S.add = null; softRefresh(); } });
+  openSheet(addHtml(), { onClose: () => { if (recog) recog.abort(); S.add = null; softRefresh(); } });
   const inp = $('#add-input');
   inp.value = prefill;
   inp.focus();
@@ -880,6 +880,7 @@ function addHtml() {
     <div id="add-single">
       <div class="add-field">
         <input id="add-input" type="text" lang="nl" placeholder="bijv. de gemeente" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="done">
+        <button class="icon-btn mic" id="mic-btn" data-action="dictate" aria-label="Say a Dutch word">${icon('mic', 21)}</button>
         ${canPaste ? `<button class="icon-btn" data-action="paste" aria-label="Paste">${icon('clipboard', 20)}</button>` : ''}
       </div>
       <div id="add-preview"><p class="hint">Type or paste a Dutch word or phrase. The translation appears automatically — just press <b>Enter</b> to save.</p></div>
@@ -889,6 +890,47 @@ function addHtml() {
       <button class="btn btn-primary btn-block" data-action="bulk-add">${icon('plus', 18)} Add all</button>
       <p class="hint">Translations are fetched in the background — you can close this right away.</p>
     </div>`;
+}
+
+// ── Voice input: say a Dutch word, it is typed into the Add field
+let recog = null;
+function dictate(btn) {
+  if (recog) { recog.stop(); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const inp = $('#add-input');
+  if (!SR) {
+    inp.focus();
+    toast(isIOS() ? 'Tap the 🎤 on your keyboard to dictate (switch the keyboard to Dutch first)' : 'Voice input isn’t supported in this browser — use the 🎤 on your keyboard', { ms: 5000 });
+    return;
+  }
+  const r = new SR();
+  r.lang = 'nl-NL';
+  r.interimResults = true;
+  r.continuous = false;
+  r.maxAlternatives = 1;
+  recog = r;
+  btn.classList.add('listening');
+  inp.placeholder = 'Luisteren… zeg een woord';
+  let finalText = '';
+  r.onresult = (e) => {
+    let t = '';
+    for (const res of e.results) t += res[0].transcript;
+    t = t.trim().replace(/[.!?。]+$/, '');
+    if (t && t === t[0].toUpperCase() + t.slice(1) && !/^[A-Z]{2,}/.test(t)) t = t[0].toLowerCase() + t.slice(1); // "Fiets" -> "fiets"
+    inp.value = t;
+    if (e.results[e.results.length - 1].isFinal) finalText = t;
+  };
+  r.onerror = (e) => {
+    const msg = { 'not-allowed': 'Microphone access is blocked — allow it in your browser settings', 'service-not-allowed': 'Voice input isn’t available here — use the 🎤 on your keyboard', 'no-speech': 'I didn’t hear anything — tap the mic and try again', network: 'Voice input needs an internet connection' }[e.error];
+    if (e.error !== 'aborted') toast(msg || 'Voice input failed: ' + esc(e.error), { ms: 4000 });
+  };
+  r.onend = () => {
+    recog = null;
+    btn.classList.remove('listening');
+    inp.placeholder = 'bijv. de gemeente';
+    if (finalText || inp.value) { onAddInput(); vibrate(10); }
+  };
+  try { r.start(); vibrate(8); } catch { recog = null; btn.classList.remove('listening'); }
 }
 
 let addT = 0;
@@ -1251,6 +1293,8 @@ function renderSessionCard(opts = {}) {
       <button class="icon-btn" data-action="end-session" aria-label="Close">${icon('x', 24)}</button>
       <div class="s-progress"><i style="width:${(pct * 100).toFixed(1)}%"></i></div>
       <span class="s-left">${left}</span>
+      <button class="icon-btn" data-action="session-edit" aria-label="Edit this word">${icon('edit', 19)}</button>
+      <button class="icon-btn" data-action="session-delete" aria-label="Delete this word">${icon('trash', 19)}</button>
       <button class="icon-btn" data-action="undo-rate" aria-label="Undo" ${se.undo.length ? '' : 'disabled'}>${icon('undo', 20)}</button>
     </div>
     ${se.title ? `<div class="s-title">${esc(se.title)}</div>` : ''}
@@ -1620,6 +1664,7 @@ document.addEventListener('click', async (e) => {
       break;
     case 'open-add': openAdd(el.dataset.prefill || ''); break;
     case 'close-sheet': closeSheet(); break;
+    case 'dictate': dictate(el); break;
     case 'paste':
       try { const t = (await navigator.clipboard.readText()).trim().split('\n')[0].slice(0, 80); if (t) { $('#add-input').value = t; onAddInput(); } } catch { toast('Paste was blocked — long-press the field to paste'); }
       break;
@@ -1678,6 +1723,28 @@ document.addEventListener('click', async (e) => {
     case 'reveal': reveal(); break;
     case 'rate': rate(+el.dataset.g); break;
     case 'undo-rate': undoRate(); break;
+    case 'session-delete': {
+      const se = S.session; if (!se || !se.current) break;
+      const c = S.cards.get(se.current.id); if (!c) break;
+      if (!confirm(`Delete “${c.word}” from your words?`)) break;
+      const drop = (x) => x.id !== c.id;
+      se.queue = se.queue.filter(drop); se.learning = se.learning.filter(drop); se.undo = se.undo.filter((u) => u.item.id !== c.id);
+      S.cards.delete(c.id); await db.deleteCard(c.id);
+      toast(`Deleted <b>${esc(c.word)}</b>`, { action: 'Undo', onAction: async () => { await saveCard(c); } });
+      nextCard();
+      break;
+    }
+    case 'session-edit': {
+      const se = S.session; if (!se || !se.current) break;
+      const c = S.cards.get(se.current.id); if (!c) break;
+      openSheet(editHtml(c), {
+        onClose: () => {
+          const s2 = S.session; if (!s2 || !s2.current) return;
+          if (S.cards.get(s2.current.id)) renderSessionCard({}); else nextCard(); // deleted from the sheet
+        },
+      });
+      break;
+    }
     case 'end-session': endSession(S.session && S.session.done > 0); break;
     case 'close-summary': closeOverlay(); break;
     case 'drill-dehet': startDrill('dehet'); break;
@@ -1782,6 +1849,7 @@ document.addEventListener('submit', async (e) => {
     if (fd.has('translation2')) c.translations = { ...(c.translations || {}), [S.settings.lang2]: fd.get('translation2').trim() };
     await saveCard(c);
     toast('Saved');
+    if (S.session) { closeSheet(); return; } // edited during a review: back to the card
     $('#sheet-body').innerHTML = detailHtml(c);
     render();
   }
@@ -1798,6 +1866,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (S.session) {
+    if ($('#sheet.open')) { if (e.key === 'Escape') closeSheet(); return; }
     if (inField) return;
     if ((e.key === ' ' || e.key === 'Enter') && !S.session.revealed) { e.preventDefault(); reveal(); }
     else if (/^[1-4]$/.test(e.key) && S.session.revealed) { if (S.session.mode !== 'srs' && (e.key === '2' || e.key === '4')) return; rate(+e.key); }

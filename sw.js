@@ -1,5 +1,5 @@
 // Woordje service worker — app shell works fully offline.
-const CACHE = 'woordje-v1.2.0';
+const CACHE = 'woordje-v1.3.0';
 const SHELL = [
   './',
   './index.html',

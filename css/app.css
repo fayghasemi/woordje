@@ -538,6 +538,11 @@ body.in-session .toast { bottom: calc(var(--safe-b) + 110px); }
 :root[data-theme="dark"] .toast { background: #2A2F3D; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .toast { background: #2A2F3D; } }
 
+/* voice input */
+.icon-btn.mic { color: var(--brand); }
+.icon-btn.mic.listening { background: var(--again); color: #fff; animation: micPulse 1.2s ease-in-out infinite; }
+@keyframes micPulse { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--again) 45%, transparent); } 50% { box-shadow: 0 0 0 10px transparent; } }
+
 /* multiple meanings */
 .alt-label { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: -4px; }
 .alt-chips .chip.on { background: var(--brand); border-color: var(--brand); color: #fff; }
