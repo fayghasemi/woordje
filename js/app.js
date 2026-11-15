@@ -4,7 +4,7 @@ import { lookup, parseInput, translateTerm, translateText, LANGS, RTL } from './
 import { PACKS, BUILTIN_NOUNS } from './starter.js';
 import { icon } from './icons.js';
 
-const VERSION = '1.4.2';
+const VERSION = '1.4.3';
 
 // ───────────────────────── helpers ─────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
@@ -2168,6 +2168,7 @@ async function boot() {
   } else if (params.toString()) history.replaceState(null, '', location.pathname);
 
   document.body.classList.add('ready');
+  try { if (sessionStorage.getItem('woordje-updated')) { sessionStorage.removeItem('woordje-updated'); setTimeout(() => toast(`Updated to v${VERSION} ✨`), 600); } } catch {}
   requestPersistence().then((ok) => { const el = $('#storage-info'); if (el && ok) el.textContent = 'Your words are stored privately on this device (persistent storage on).'; });
   processPending();
   addEventListener('online', processPending);
@@ -2186,11 +2187,18 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     // check for updates whenever the app comes back to the foreground
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
   }).catch(() => {});
+  // A new version was installed: switch to it right away, unless you're busy (then switch next time you're idle)
+  let updatePending = false;
+  const busy = () => S.session || $('#session.open') || $('#sheet.open') || (S.tab === 'translate' && S.tr.text) ||
+    (document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName));
+  const applyUpdate = () => { if (!updatePending || busy()) return; updatePending = false; sessionStorage.setItem('woordje-updated', '1'); location.reload(); };
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController) return;
-    if (S.session || $('#session.open')) return; // don't interrupt a review
-    toast('Woordje was updated ✨', { action: 'Reload', ms: 10000, onAction: () => location.reload() });
+    updatePending = true;
+    applyUpdate();
   });
+  setInterval(applyUpdate, 2000);
+  document.addEventListener('visibilitychange', applyUpdate);
 }
 
 boot();
