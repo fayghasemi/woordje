@@ -4,7 +4,7 @@ import { lookup, parseInput, translateTerm, translateText, LANGS, RTL } from './
 import { PACKS, BUILTIN_NOUNS } from './starter.js';
 import { icon } from './icons.js';
 
-const VERSION = '1.4.0';
+const VERSION = '1.4.1';
 
 // ───────────────────────── helpers ─────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
@@ -893,7 +893,7 @@ function viewTranslate() {
 function trOutHtml() {
   const t = S.tr;
   if (!t.text.trim()) {
-    return `<div class="tr-tip">${icon('info', 18)}<p>Type, paste or say a sentence. Tap any Dutch word in the result to add it to your words — the sentence is saved with it as an example.</p></div>`;
+    return `<div class="tr-tip">${icon('info', 18)}<p>Type, paste or say a sentence. Tap any Dutch word to add it to your words instantly — its translation is filled in automatically and the sentence is saved as its example.</p></div>`;
   }
   if (t.loading && !t.out) return `<div class="tr-card tr-result"><div class="sk sk2"></div><div class="sk sk3"></div></div>`;
   if (t.err && !t.out) return `<div class="tr-card tr-result"><p class="hint warn">${esc(t.err)}</p></div>`;
@@ -910,7 +910,7 @@ function trOutHtml() {
       </div>
     </div>
     ${words.length ? `
-    <div class="tr-words-label">Tap a Dutch word to add it</div>
+    <div class="tr-words-label">Tap a Dutch word to add it to your words</div>
     <div class="alt-chips tr-words">${words.map((w) => { const have = findDuplicate(w); return `<button class="chip ${have ? 'on' : ''}" data-action="tr-add-word" data-w="${esc(w)}">${have ? '✓ ' : '+ '}${esc(w)}</button>`; }).join('')}</div>` : ''}`;
 }
 
@@ -1841,8 +1841,19 @@ document.addEventListener('click', async (e) => {
       const w = el.dataset.w;
       const have = findDuplicate(w);
       if (have) { openDetail(have.id); break; }
-      const sentence = S.tr.src === 'nl' ? S.tr.text.trim() : S.tr.out;
-      openAdd(w, sentence.length <= 300 ? sentence : '');
+      // Add straight away: translation, de/het, Persian etc. are filled in the background
+      const sentence = (S.tr.src === 'nl' ? S.tr.text : S.tr.out).trim();
+      // if the sentence says "de bank" / "het huis", take that article
+      const m = sentence.match(new RegExp(`(?:^|[^\\p{L}])(de|het)\\s+${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}])`, 'iu'));
+      const c = makeCard({ word: w, article: m ? m[1].toLowerCase() : '', note: sentence.length <= 300 ? sentence : '' });
+      c.userEdited = false;
+      S.cards.set(c.id, c);
+      today().a++; saveStats();
+      el.classList.add('on'); el.textContent = '✓ ' + w;
+      vibrate(12);
+      toast(`Added <b>${esc(w)}</b> — translating…`, { action: 'Undo', onAction: async () => { S.cards.delete(c.id); await db.deleteCard(c.id); today().a = Math.max(0, today().a - 1); saveStats(); renderTrOut(); } });
+      await saveCard(c);
+      processPending();
       break;
     }
     case 'tr-load': {
