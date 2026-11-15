@@ -54,9 +54,9 @@ export function parseInput(raw) {
 }
 
 // ---------- Translation ----------
-async function googleTranslate(q, tl) {
+async function googleTranslate(q, tl, sl = 'nl') {
   const url =
-    'https://translate.googleapis.com/translate_a/single?client=gtx&sl=nl&tl=' +
+    'https://translate.googleapis.com/translate_a/single?client=gtx&sl=' + encodeURIComponent(sl) + '&tl=' +
     encodeURIComponent(tl) + '&dt=t&dt=bd&dj=1&q=' + encodeURIComponent(q);
   const j = await getJSON(url);
   const main = (j.sentences || []).map((s) => s.trans || '').join('').trim();
@@ -68,8 +68,8 @@ async function googleTranslate(q, tl) {
   return { main, alts };
 }
 
-async function myMemory(q, tl) {
-  const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(q) + '&langpair=nl|' + tl;
+async function myMemory(q, tl, sl = 'nl') {
+  const url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(q) + '&langpair=' + sl + '|' + tl;
   const j = await getJSON(url);
   let main = ((j.responseData && j.responseData.translatedText) || '').replace(/^["'“”«»]+|["'“”«»]+$/g, '').trim();
   if (!main || /MYMEMORY WARNING|QUERY LENGTH|INVALID/i.test(main)) throw new Error('mymemory');
@@ -87,14 +87,14 @@ async function myMemory(q, tl) {
 
 const NON_LATIN = new Set(['fa', 'ar', 'ru', 'uk', 'zh', 'hi']);
 
-export async function translate(q, tl = 'en') {
+export async function translate(q, tl = 'en', sl = 'nl') {
   let g = null;
-  try { g = await googleTranslate(q, tl); } catch {}
+  try { g = await googleTranslate(q, tl, sl); } catch {}
   // Google sometimes returns an untranslated English pivot (e.g. "GP") for non-Latin targets
   const suspicious = g && NON_LATIN.has(tl) && /^[\x00-\x7F]+$/.test(g.main);
   if (g && !suspicious) return g;
   try {
-    const m = await myMemory(q, tl);
+    const m = await myMemory(q, tl, sl);
     if (g) m.alts = [...m.alts, ...g.alts];
     return m;
   } catch (e) {
@@ -255,4 +255,14 @@ export async function lookup(raw, tl = 'en') {
     definitions: (w && w.definitions) || [],
     examples: ex.status === 'fulfilled' ? ex.value : [],
   };
+}
+
+/** Free-text translation (sentences) in any direction, e.g. nl -> en or fa -> nl. */
+export async function translateText(q, sl, tl, hint = 'en') {
+  // sl may be 'auto': Google detects the language; MyMemory needs a real code, so use the hint
+  const mm = () => myMemory(q, tl, sl === 'auto' ? hint : sl);
+  let g = null;
+  try { g = await googleTranslate(q, tl, sl); } catch {}
+  if (g && !(NON_LATIN.has(tl) && /^[\x00-\x7F]+$/.test(g.main))) return g.main;
+  try { return (await mm()).main; } catch (e) { if (g) return g.main; throw e; }
 }

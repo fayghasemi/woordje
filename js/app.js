@@ -1,10 +1,10 @@
 import { db, requestPersistence } from './db.js';
 import { schedule, preview, fmtInterval, strength, newSrs, State, DAY, MIN } from './fsrs.js';
-import { lookup, parseInput, translateTerm, LANGS, RTL } from './lookup.js';
+import { lookup, parseInput, translateTerm, translateText, LANGS, RTL } from './lookup.js';
 import { PACKS, BUILTIN_NOUNS } from './starter.js';
 import { icon } from './icons.js';
 
-const VERSION = '1.3.1';
+const VERSION = '1.4.0';
 
 // ───────────────────────── helpers ─────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
@@ -52,6 +52,8 @@ const S = {
   deferredInstall: null,
   elKey: '', // kept out of settings so it never ends up in backup files
   elVoices: null,
+  tr: { src: 'nl', text: '', out: '', out2: '', outLang: '', loading: false, err: '', seq: 0 },
+  trHistory: [],
 };
 
 let saveStatsT = 0;
@@ -386,7 +388,7 @@ function greeting() {
 function render(quiet = false) {
   const v = $('#view');
   v.classList.toggle('no-anim', quiet);
-  const views = { home: viewHome, words: viewWords, practice: viewPractice, settings: viewSettings };
+  const views = { home: viewHome, words: viewWords, practice: viewPractice, translate: viewTranslate, settings: viewSettings };
   v.innerHTML = views[S.tab]();
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === S.tab));
   afterRender();
@@ -401,6 +403,7 @@ function softRefresh() {
   softLast = Date.now();
   const active = document.activeElement;
   if (S.tab === 'words' && active && active.id === 'word-search') { renderWordList(); return; }
+  if (S.tab === 'translate') { if (!$('#sheet.open')) renderTrOut(); return; } // never re-render while typing a sentence
   if ($('#sheet.open')) { if (S.detailId) refreshDetail(); }
   const y = $('#view').scrollTop;
   render(true);
@@ -491,7 +494,10 @@ function viewHome() {
         <div class="eyebrow cap">${esc(dateStr)}</div>
         <h1>${greeting()}</h1>
       </div>
-      <div class="streak ${st ? 'on' : ''}" title="Day streak">${icon('flame', 18)}<b>${st}</b></div>
+      <div class="head-actions">
+        <div class="streak ${st ? 'on' : ''}" title="Day streak">${icon('flame', 18)}<b>${st}</b></div>
+        <button class="icon-btn gear" data-action="goto" data-tab="settings" aria-label="Settings">${icon('settings', 22)}</button>
+      </div>
     </header>
 
     <button class="quick-add" data-action="open-add">
@@ -834,6 +840,134 @@ async function loadUsage() {
   if (el) el.textContent = text;
 }
 
+// ───────────────────────── translate (sentences) ─────────────────────────
+const SPEECH_LANG = { nl: 'nl-NL', en: 'en-US', fa: 'fa-IR', ar: 'ar-SA', tr: 'tr-TR', de: 'de-DE', fr: 'fr-FR', es: 'es-ES', pt: 'pt-PT', it: 'it-IT', pl: 'pl-PL', uk: 'uk-UA', ru: 'ru-RU', zh: 'zh-CN', hi: 'hi-IN', id: 'id-ID' };
+const langName = (k) => (k === 'nl' ? 'Nederlands' : k === 'auto' ? 'Auto-detect' : ((LANGS[k] || LANGS.en).name.split(' (')[0]));
+const trTarget = () => (S.tr.src === 'nl' ? S.settings.lang : 'nl');
+const trSecond = () => (S.tr.src === 'nl' && S.settings.lang2 && S.settings.lang2 !== S.settings.lang ? S.settings.lang2 : '');
+// languages you can speak into the mic when translating *into* Dutch
+const micLangs = () => [...new Set([S.settings.lang, S.settings.lang2].filter(Boolean))];
+
+function viewTranslate() {
+  const t = S.tr;
+  const tl = trTarget();
+  const l2 = trSecond();
+  const canPaste = !!(navigator.clipboard && navigator.clipboard.readText);
+  const ml = micLangs();
+  if (!ml.includes(t.micLang)) t.micLang = ml[0];
+  const micLang = t.src === 'nl' ? 'nl' : t.micLang;
+  const hintNames = ml.map(langName).join(', ');
+  return `
+    <header class="page-head"><div><h1>Translate</h1><div class="eyebrow">Letters, signs, conversations — any sentence</div></div></header>
+
+    <div class="tr-langs">
+      <div class="tr-lang">${t.src === 'auto' ? `${esc(hintNames)}<small class="tr-auto">auto-detect</small>` : esc(langName(t.src))}</div>
+      <button class="tr-swap" data-action="tr-swap" aria-label="Swap languages">${icon('swap', 20)}</button>
+      <div class="tr-lang">${esc(langName(tl))}${l2 ? `<small> + ${esc(langName(l2))}</small>` : ''}</div>
+    </div>
+
+    <div class="tr-card">
+      <textarea id="tr-input" ${t.src === 'nl' ? 'lang="nl"' : ''} dir="auto" rows="4" placeholder="${t.src === 'nl' ? 'Typ of zeg een Nederlandse zin…' : `Type or say a sentence in ${esc(hintNames)}…`}" autocomplete="off" spellcheck="false">${esc(t.text)}</textarea>
+      <div class="tr-actions">
+        <button class="icon-btn mic" data-action="dictate" data-target="tr-input" data-lang="${micLang}" data-mode="replace" aria-label="Speak">${icon('mic', 21)}</button>
+        ${t.src !== 'nl' && ml.length > 1 ? `<button class="mic-lang" data-action="tr-mic-lang" aria-label="Microphone language">${esc(micLang.toUpperCase())}</button>` : ''}
+        ${t.src === 'nl' ? `<button class="icon-btn" data-action="tr-speak-in" aria-label="Listen">${icon('volume', 20)}</button>` : ''}
+        ${canPaste ? `<button class="icon-btn" data-action="tr-paste" aria-label="Paste">${icon('clipboard', 20)}</button>` : ''}
+        <span class="tr-spacer"></span>
+        <button class="icon-btn" data-action="tr-clear" aria-label="Clear" ${t.text ? '' : 'hidden'} id="tr-clear">${icon('x', 20)}</button>
+      </div>
+    </div>
+
+    <div id="tr-out">${trOutHtml()}</div>
+
+    ${S.trHistory.length ? `
+    <div class="section-head tr-hist-head"><h3>${icon('clock', 16)} Recent</h3><button class="link" data-action="tr-clear-history">Clear</button></div>
+    <div class="tr-history">
+      ${S.trHistory.map((h, i) => `<button class="tr-hist" data-action="tr-load" data-i="${i}">
+        <span class="tr-hist-in" dir="auto">${esc(h.text)}</span>
+        <span class="tr-hist-out" dir="auto">${esc(h.out)}</span>
+      </button>`).join('')}
+    </div>` : ''}`;
+}
+
+function trOutHtml() {
+  const t = S.tr;
+  if (!t.text.trim()) {
+    return `<div class="tr-tip">${icon('info', 18)}<p>Type, paste or say a sentence. Tap any Dutch word in the result to add it to your words — the sentence is saved with it as an example.</p></div>`;
+  }
+  if (t.loading && !t.out) return `<div class="tr-card tr-result"><div class="sk sk2"></div><div class="sk sk3"></div></div>`;
+  if (t.err && !t.out) return `<div class="tr-card tr-result"><p class="hint warn">${esc(t.err)}</p></div>`;
+  const tl = t.outLang;
+  const dutch = t.src === 'nl' ? t.text : t.out;
+  const words = [...new Set((dutch.match(/[\p{L}][\p{L}'’-]*/gu) || []).map((w) => w.toLowerCase()))].slice(0, 40);
+  return `
+    <div class="tr-card tr-result ${t.loading ? 'is-loading' : ''}">
+      <div class="tr-out-text" lang="${tl}" ${dirAttr(tl)}>${esc(t.out)}</div>
+      ${t.out2 ? `<div class="tr-out2" lang="${t.out2Lang}" ${dirAttr(t.out2Lang)}>${esc(t.out2)}</div>` : ''}
+      <div class="tr-actions">
+        ${tl === 'nl' ? `<button class="icon-btn" data-action="tr-speak-out" aria-label="Listen">${icon('volume', 20)}</button>` : ''}
+        <button class="icon-btn" data-action="tr-copy" aria-label="Copy">${icon('copy', 19)}</button>
+      </div>
+    </div>
+    ${words.length ? `
+    <div class="tr-words-label">Tap a Dutch word to add it</div>
+    <div class="alt-chips tr-words">${words.map((w) => { const have = findDuplicate(w); return `<button class="chip ${have ? 'on' : ''}" data-action="tr-add-word" data-w="${esc(w)}">${have ? '✓ ' : '+ '}${esc(w)}</button>`; }).join('')}</div>` : ''}`;
+}
+
+function renderTrOut() {
+  const box = $('#tr-out');
+  if (box) box.innerHTML = trOutHtml();
+  const c = $('#tr-clear');
+  if (c) c.hidden = !S.tr.text;
+}
+
+let trT = 0;
+function onTrInput() {
+  S.tr.text = $('#tr-input').value;
+  clearTimeout(trT);
+  if (!S.tr.text.trim()) { S.tr.out = ''; S.tr.out2 = ''; S.tr.err = ''; S.tr.loading = false; renderTrOut(); return; }
+  S.tr.loading = true;
+  renderTrOut();
+  trT = setTimeout(runTranslate, 650);
+}
+
+async function runTranslate() {
+  const t = S.tr;
+  const q = t.text.trim();
+  const seq = ++t.seq;
+  if (!q) return;
+  const tl = trTarget(), l2 = trSecond();
+  t.loading = true;
+  try {
+    const [main, second] = await Promise.all([
+      translateText(q, t.src, tl, S.tr.micLang || S.settings.lang),
+      l2 ? translateText(q, t.src, l2).catch(() => '') : Promise.resolve(''),
+    ]);
+    if (seq !== t.seq) return;
+    Object.assign(t, { out: main, out2: second, outLang: tl, out2Lang: l2, err: '' });
+    addTrHistory({ src: t.src, tl, text: q, out: main, out2: second });
+  } catch {
+    if (seq !== t.seq) return;
+    t.out = '';
+    t.err = navigator.onLine ? 'Could not translate right now — try again in a moment.' : 'You’re offline — translating needs an internet connection.';
+  }
+  t.loading = false;
+  if (S.tab === 'translate') renderTrOut();
+}
+
+let trHistT = 0;
+function addTrHistory(h) {
+  const list = S.trHistory;
+  // while typing, the newest entry keeps growing — replace it instead of adding every step
+  if (list[0] && list[0].src === h.src && (h.text.startsWith(list[0].text) || list[0].text.startsWith(h.text))) list.shift();
+  const dup = list.findIndex((x) => x.src === h.src && x.text === h.text);
+  if (dup >= 0) list.splice(dup, 1);
+  list.unshift({ ...h, ts: Date.now() });
+  S.trHistory = list.slice(0, 30);
+  clearTimeout(trHistT);
+  trHistT = setTimeout(() => db.setMeta('trHistory', S.trHistory).catch(() => {}), 800);
+}
+
 // ───────────────────────── sheet (bottom drawer) ─────────────────────────
 function openSheet(html, opts = {}) {
   const sheet = $('#sheet');
@@ -859,8 +993,8 @@ function closeSheet() {
 }
 
 // ── Add word
-function openAdd(prefill = '') {
-  S.add = { input: prefill, result: null, loading: false, error: '', translation: '', translationTouched: false, article: null, note: '', bulk: false, seq: 0 };
+function openAdd(prefill = '', note = '') {
+  S.add = { input: prefill, result: null, loading: false, error: '', translation: '', translationTouched: false, article: null, note, bulk: false, seq: 0 };
   openSheet(addHtml(), { onClose: () => { if (recog) recog.abort(); S.add = null; softRefresh(); } });
   const inp = $('#add-input');
   inp.value = prefill;
@@ -909,7 +1043,7 @@ function dictate(btn) {
     return;
   }
   const r = new SR();
-  r.lang = 'nl-NL';
+  r.lang = SPEECH_LANG[btn.dataset.lang || 'nl'] || 'nl-NL';
   r.interimResults = true;
   r.continuous = false;
   r.maxAlternatives = 1;
@@ -917,7 +1051,7 @@ function dictate(btn) {
   btn.classList.add('listening');
   const oldPlaceholder = inp.placeholder;
   inp.placeholder = wordMode ? 'Luisteren… zeg een woord' : 'Luisteren… zeg de zin';
-  const base = wordMode ? '' : inp.value.trim();
+  const base = wordMode || btn.dataset.mode === 'replace' ? '' : inp.value.trim();
   let finalText = '';
   r.onresult = (e) => {
     let t = '';
@@ -1679,6 +1813,45 @@ document.addEventListener('click', async (e) => {
     case 'open-add': openAdd(el.dataset.prefill || ''); break;
     case 'close-sheet': closeSheet(); break;
     case 'dictate': dictate(el); break;
+    case 'tr-swap': {
+      const t = S.tr;
+      const newSrc = t.src === 'nl' ? 'auto' : 'nl';
+      if (t.out) t.text = t.out; // continue with the result, like Google Translate
+      Object.assign(t, { src: newSrc, out: '', out2: '', err: '' });
+      render(true);
+      if (t.text.trim()) { t.loading = true; renderTrOut(); runTranslate(); }
+      break;
+    }
+    case 'tr-clear': {
+      Object.assign(S.tr, { text: '', out: '', out2: '', err: '', loading: false });
+      const i = $('#tr-input'); if (i) { i.value = ''; i.focus(); }
+      renderTrOut(); break;
+    }
+    case 'tr-paste':
+      try { const t = (await navigator.clipboard.readText()).trim(); if (t) { $('#tr-input').value = t; onTrInput(); } } catch { toast('Paste was blocked — long-press the box to paste'); }
+      break;
+    case 'tr-speak-in': speak(S.tr.text.trim()); break;
+    case 'tr-speak-out': speak(S.tr.out); break;
+    case 'tr-copy': {
+      const txt = [S.tr.out, S.tr.out2].filter(Boolean).join('\n');
+      try { await navigator.clipboard.writeText(txt); toast('Copied'); } catch { toast('Copy was blocked'); }
+      break;
+    }
+    case 'tr-add-word': {
+      const w = el.dataset.w;
+      const have = findDuplicate(w);
+      if (have) { openDetail(have.id); break; }
+      const sentence = S.tr.src === 'nl' ? S.tr.text.trim() : S.tr.out;
+      openAdd(w, sentence.length <= 300 ? sentence : '');
+      break;
+    }
+    case 'tr-load': {
+      const h = S.trHistory[+el.dataset.i]; if (!h) break;
+      Object.assign(S.tr, { src: h.src, text: h.text, out: h.out, out2: h.out2 || '', outLang: h.tl, out2Lang: h.src === 'nl' ? S.settings.lang2 : '', err: '', loading: false });
+      render(true); $('#view').scrollTop = 0; break;
+    }
+    case 'tr-mic-lang': { const ml = micLangs(); S.tr.micLang = ml[(ml.indexOf(S.tr.micLang) + 1) % ml.length]; render(true); break; }
+    case 'tr-clear-history': S.trHistory = []; db.setMeta('trHistory', []).catch(() => {}); render(true); break;
     case 'paste':
       try { const t = (await navigator.clipboard.readText()).trim().split('\n')[0].slice(0, 80); if (t) { $('#add-input').value = t; onAddInput(); } } catch { toast('Paste was blocked — long-press the field to paste'); }
       break;
@@ -1817,6 +1990,7 @@ document.addEventListener('input', (e) => {
   if (t.id === 'add-input') onAddInput();
   else if (t.id === 'add-translation' && S.add) { S.add.translation = t.value; S.add.translationTouched = true; }
   else if (t.id === 'add-note' && S.add) S.add.note = t.value;
+  else if (t.id === 'tr-input') onTrInput();
   else if (t.id === 'word-search') { S.words.q = t.value; renderWordList(); }
   else if (t.dataset.setting === 'rate') { S.settings.rate = +t.value; saveSettings(); }
 });
@@ -1929,6 +2103,7 @@ async function boot() {
   try {
     const [cards, settings, stats, elKey] = await Promise.all([db.allCards(), db.getMeta('settings'), db.getMeta('stats'), db.getMeta('elKey')]);
     S.elKey = elKey || '';
+    try { S.trHistory = (await db.getMeta('trHistory')) || []; } catch {}
     for (const c of cards || []) S.cards.set(c.id, c);
     S.settings = { ...DEFAULT_SETTINGS, ...(settings || {}) };
     S.stats = stats && stats.days ? stats : { days: {} };
@@ -1945,7 +2120,7 @@ async function boot() {
   const params = new URLSearchParams(location.search);
   const shared = params.get('text') || params.get('title') || params.get('add') || '';
   const tab = params.get('tab');
-  if (tab && ['home', 'words', 'practice', 'settings'].includes(tab)) S.tab = tab;
+  if (tab && ['home', 'words', 'practice', 'translate', 'settings'].includes(tab)) S.tab = tab;
   render();
   if (params.get('review') !== null) startReview();
   if (shared || params.has('add')) {
