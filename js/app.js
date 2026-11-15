@@ -4,7 +4,7 @@ import { lookup, parseInput, translateTerm, translateText, LANGS, RTL } from './
 import { PACKS, BUILTIN_NOUNS } from './starter.js';
 import { icon } from './icons.js';
 
-const VERSION = '1.4.1';
+const VERSION = '1.4.2';
 
 // ───────────────────────── helpers ─────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
@@ -969,8 +969,31 @@ function addTrHistory(h) {
 }
 
 // ───────────────────────── sheet (bottom drawer) ─────────────────────────
+// ───────────────────────── back button (Android) ─────────────────────────
+// Every screen that opens on top (sheet, review, another tab) adds a browser-history entry,
+// so the phone's Back button closes that screen instead of leaving the app.
+let ignorePop = 0;
+function pushLayer(layer) { try { history.pushState({ layer }, ''); } catch {} }
+function popLayer() {
+  if (history.state && history.state.layer) { ignorePop++; history.back(); }
+}
+addEventListener('popstate', () => {
+  if (ignorePop > 0) { ignorePop--; return; }
+  if ($('#sheet.open')) { closeSheet(true); return; }
+  if ($('#session.open')) { closeOverlay(true); return; } // review progress is saved card by card
+  if (S.tab !== 'home') { S.tab = 'home'; render(); $('#view').scrollTop = 0; }
+});
+function setTab(tab) {
+  closeSheet();
+  if (tab === S.tab) return;
+  if (S.tab === 'home') pushLayer('tab');
+  else if (tab === 'home') popLayer();
+  S.tab = tab; render(); $('#view').scrollTop = 0;
+}
+
 function openSheet(html, opts = {}) {
   const sheet = $('#sheet');
+  if (!sheet.classList.contains('open')) pushLayer('sheet');
   const body = $('#sheet-body');
   body.innerHTML = html;
   sheet.className = 'sheet open' + (opts.tall ? ' tall' : '');
@@ -979,10 +1002,11 @@ function openSheet(html, opts = {}) {
   body.scrollTop = 0;
   S.onSheetClose = opts.onClose || null;
 }
-function closeSheet() {
+function closeSheet(fromBack = false) {
   if (recog) recog.abort();
   const sheet = $('#sheet');
   if (!sheet.classList.contains('open')) return;
+  if (!fromBack) popLayer();
   sheet.classList.remove('open');
   $('#scrim').classList.remove('open');
   document.body.classList.remove('sheet-open');
@@ -1343,6 +1367,7 @@ function beginSession({ mode, queue, learning = [], title = '' }) {
     current: null, revealed: false, typed: null, undo: [],
     seen: new Set(),
   };
+  if (!$('#session').classList.contains('open')) pushLayer('session');
   $('#session').classList.add('open');
   document.body.classList.add('in-session');
   nextCard();
@@ -1354,6 +1379,7 @@ function endSession(show = true) {
   if (show && se.done > 0) {
     renderSummary(se);
   } else {
+    popLayer();
     $('#session').classList.remove('open');
     document.body.classList.remove('in-session');
     render();
@@ -1639,6 +1665,7 @@ function startDeHet() {
   let pool = mine.length >= 12 ? mine : [...mine, ...BUILTIN_NOUNS.filter((b) => !mine.some((m) => norm(m.word) === norm(b.word))).map((b) => ({ word: b.word, article: b.article, en: b.en, lang: 'en' }))];
   pool = shuffle(pool).slice(0, 20);
   S.dehet = { pool, i: 0, right: 0, streak: 0, best: 0, answered: null, startedAt: Date.now(), wrong: [] };
+  if (!$('#session').classList.contains('open')) pushLayer('session');
   $('#session').classList.add('open');
   document.body.classList.add('in-session');
   renderDeHet();
@@ -1696,7 +1723,8 @@ function answerDeHet(v) {
   setTimeout(() => { if (S.dehet === g) { g.answered = null; g.i++; renderDeHet(); } }, ok ? 650 : 1400);
 }
 
-function closeOverlay() {
+function closeOverlay(fromBack = false) {
+  if (!fromBack && $('#session').classList.contains('open')) popLayer();
   S.session = null; S.dehet = null;
   $('#session').classList.remove('open');
   document.body.classList.remove('in-session');
@@ -1807,7 +1835,7 @@ document.addEventListener('click', async (e) => {
   const id = el.dataset.id;
   switch (a) {
     case 'goto':
-      S.tab = el.dataset.tab; closeSheet(); render(); $('#view').scrollTop = 0;
+      setTab(el.dataset.tab);
       if (el.dataset.scroll) setTimeout(() => { const t = document.getElementById(el.dataset.scroll); t && t.scrollIntoView({ behavior: 'smooth' }); }, 50);
       break;
     case 'open-add': openAdd(el.dataset.prefill || ''); break;
@@ -2097,7 +2125,7 @@ document.addEventListener('keydown', (e) => {
 $$('.tab').forEach((t) => t.addEventListener('click', () => {
   if (t.dataset.tab === 'add') { openAdd(); return; }
   if (S.tab === t.dataset.tab) { $('#view').scrollTo({ top: 0, behavior: 'smooth' }); return; }
-  S.tab = t.dataset.tab; closeSheet(); render(); $('#view').scrollTop = 0;
+  setTab(t.dataset.tab);
 }));
 
 // ───────────────────────── theme ─────────────────────────
