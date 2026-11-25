@@ -14,7 +14,7 @@ You type a word, and the app fills in the rest by itself.
 - **Starter packs**: KNM essentials (government, health, work, housing) and A2 everyday nouns.
 - **Translate into** English, Persian, Arabic, Turkish, Ukrainian and 10 more languages.
 - Streaks, daily goal ring, activity heatmap, dark mode, and works offline.
-- Your data stays **on your phone** (IndexedDB). Use **Settings → Export backup** now and then.
+- Your data stays **on your phone** (IndexedDB). Turn on **Settings → Automatic backup**: every change is copied to a private gist in your GitHub account, and restored automatically if the phone loses its data.
 
 ## Free services used (no keys, no accounts)
 Google Translate (public endpoint) with MyMemory as the fallback, Wiktionary (CC BY-SA) and Tatoeba (CC BY 2.0 FR).

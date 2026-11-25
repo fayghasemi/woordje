@@ -4,7 +4,7 @@ import { lookup, parseInput, translateTerm, translateText, LANGS, RTL } from './
 import { PACKS, BUILTIN_NOUNS } from './starter.js';
 import { icon } from './icons.js';
 
-const VERSION = '1.4.3';
+const VERSION = '1.5.0';
 
 // ───────────────────────── helpers ─────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
@@ -57,8 +57,8 @@ const S = {
 };
 
 let saveStatsT = 0;
-function saveStats() { clearTimeout(saveStatsT); saveStatsT = setTimeout(() => db.setMeta('stats', S.stats), 300); }
-function saveSettings() { db.setMeta('settings', S.settings); }
+function saveStats() { clearTimeout(saveStatsT); saveStatsT = setTimeout(() => db.setMeta('stats', S.stats), 300); scheduleBackup(); }
+function saveSettings() { db.setMeta('settings', S.settings); scheduleBackup(); }
 async function saveCard(c) { c.updatedAt = Date.now(); S.cards.set(c.id, c); await db.putCard(c); }
 
 function today() {
@@ -513,7 +513,19 @@ function viewHome() {
       <div class="tile"><b>${c.known}</b><span>Known</span></div>
     </div>`}
 
-    ${backupNag ? `
+    ${gh.token && ghLooksLost() ? `
+    <div class="notice notice-danger">
+      ${icon('info', 20)}<div><b>Words missing?</b><span>Your backup has ${gh.lastCount} words, this phone has ${S.cards.size}.</span></div>
+      <div class="notice-btns"><button class="btn btn-sm btn-primary" data-action="gh-restore">Restore</button><button class="btn btn-sm btn-soft" data-action="gh-accept">I deleted them</button></div>
+    </div>` : ''}
+    ${gh.token && gh.error ? `
+    <div class="notice notice-danger" data-action="gh-setup">
+      ${icon('info', 20)}<div><b>Backup stopped</b><span>${esc(gh.error)}</span></div>${icon('chevron', 18)}
+    </div>` : ''}
+    ${!gh.token && S.cards.size >= 5 ? `
+    <div class="notice notice-accent" data-action="gh-setup">
+      ${icon('upload', 20)}<div><b>Turn on automatic backup</b><span>Free and private, in your GitHub account — so your words can never get lost again.</span></div>${icon('chevron', 18)}
+    </div>` : backupNag && !gh.token ? `
     <div class="notice" data-action="export">
       ${icon('download', 20)}<div><b>Back up your words</b><span>Keep a copy safe — it takes one tap.</span></div>${icon('chevron', 18)}
     </div>` : ''}
@@ -763,6 +775,16 @@ function viewSettings() {
 
     <div class="group-label" id="packs">Starter packs</div>
     <div class="group">${packs}</div>
+
+    <div class="group-label" id="backup">Automatic backup</div>
+    <div class="group">
+      ${gh.token ? `
+      <div class="set-row"><div><b>${icon('check', 18)} Backup is on</b><span>${gh.error ? `<span class="failed">${esc(gh.error)}</span>` : gh.busy ? 'Backing up…' : gh.last ? `Last backup ${ago(gh.last)} · ${gh.lastCount} words` : 'Waiting for the first backup'}</span></div><button class="btn btn-sm btn-soft" data-action="gh-backup">Back up now</button></div>
+      <button class="set-row link-row" data-action="gh-restore"><div><b>${icon('download', 18)} Restore from backup</b><span>Brings back any words missing on this phone (nothing is deleted)</span></div>${icon('chevron', 18)}</button>
+      <a class="set-row link-row" href="https://gist.github.com/${esc(gh.gistId)}" target="_blank" rel="noopener"><div><b>${icon('share', 18)} View backup on GitHub</b><span>Private — only you can see it</span></div>${icon('chevron', 18)}</a>
+      <button class="set-row link-row danger" data-action="gh-disconnect"><div><b>Turn off automatic backup</b><span>Your existing backup stays on GitHub</span></div></button>` : `
+      <button class="set-row link-row" data-action="gh-setup"><div><b>${icon('upload', 18)} Turn on automatic backup</b><span>Free, private, saved to your GitHub account after every change — protects your words if the phone clears its data</span></div>${icon('chevron', 18)}</button>`}
+    </div>
 
     <div class="group-label">Your data</div>
     <div class="group">
@@ -1731,6 +1753,153 @@ function closeOverlay(fromBack = false) {
   render();
 }
 
+// ───────────────────────── automatic cloud backup (private GitHub gist) ─────────────────────────
+// Your words are copied to a private gist in your own GitHub account a few seconds after every change,
+// so a cleared phone or a new phone can restore everything. The token never leaves this phone except to GitHub.
+const GIST_FILE = 'woordje-backup.json';
+const TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=gist&description=Woordje%20backup';
+const gh = { token: '', gistId: '', last: 0, lastCount: 0, error: '', busy: false };
+let ghDirty = false, ghT = 0;
+// every change to your words schedules a backup
+for (const k of ['putCard', 'putCards', 'deleteCard']) {
+  const f = db[k];
+  db[k] = (...args) => { const p = f.apply(db, args); scheduleBackup(); return p; };
+}
+
+function ghSaveMeta() { db.setMeta('gh', { token: gh.token, gistId: gh.gistId, last: gh.last, lastCount: gh.lastCount }).catch(() => {}); }
+
+async function ghApi(path, opts = {}) {
+  const headers = { Accept: 'application/vnd.github+json', Authorization: 'Bearer ' + gh.token, 'X-GitHub-Api-Version': '2022-11-28' };
+  if (opts.body) headers['Content-Type'] = 'application/json';
+  const r = await fetch('https://api.github.com' + path, { ...opts, headers, cache: 'no-store' });
+  if (!r.ok) {
+    let m = 'HTTP ' + r.status;
+    try { const j = await r.json(); m = j.message || m; } catch {}
+    const e = new Error(m); e.status = r.status; throw e;
+  }
+  return r.status === 204 ? null : r.json();
+}
+
+function backupPayload() {
+  return { app: 'woordje', version: 1, exportedAt: new Date().toISOString(), settings: S.settings, stats: S.stats, trHistory: S.trHistory, cards: [...S.cards.values()] };
+}
+
+async function ghReadBackup() {
+  const g = await ghApi('/gists/' + gh.gistId);
+  const f = g.files && g.files[GIST_FILE];
+  if (!f) throw new Error('Backup file not found in the gist');
+  const text = f.truncated ? await (await fetch(f.raw_url, { cache: 'no-store' })).text() : f.content;
+  return JSON.parse(text);
+}
+
+// Words "look missing" when far fewer are on the phone than in the last backup — never overwrite the backup then.
+const ghLooksLost = () => gh.lastCount >= 10 && S.cards.size < gh.lastCount * 0.5;
+
+async function ghBackupNow(manual = false) {
+  if (!gh.token || !gh.gistId || gh.busy) return;
+  if (!navigator.onLine) { if (manual) toast('You’re offline — will back up when you’re back online'); return; }
+  if (ghLooksLost() && !manual) { softRefresh(); return; }
+  gh.busy = true; ghDirty = false;
+  try {
+    const count = S.cards.size;
+    await ghApi('/gists/' + gh.gistId, { method: 'PATCH', body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify(backupPayload()) } } }) });
+    Object.assign(gh, { last: Date.now(), lastCount: count, error: '' });
+    ghSaveMeta();
+    if (manual) toast(`Backed up ${count} words to GitHub ✓`);
+  } catch (e) {
+    ghDirty = true;
+    gh.error = e.status === 401 || e.status === 403 ? 'GitHub refused the token — reconnect backup in Settings' : e.status === 404 ? 'Backup not found on GitHub — reconnect backup in Settings' : '';
+    if (manual || gh.error) toast(gh.error || 'Backup failed: ' + esc(e.message));
+  } finally {
+    gh.busy = false;
+    if (S.tab === 'settings' || S.tab === 'home') softRefresh();
+  }
+}
+
+function scheduleBackup() {
+  if (!gh.token) return;
+  ghDirty = true;
+  clearTimeout(ghT);
+  ghT = setTimeout(() => ghBackupNow(), 15000);
+}
+
+async function ghRestore(silent = false) {
+  if (!gh.token || !gh.gistId) return 0;
+  try {
+    const data = await ghReadBackup();
+    const r = await importBackup(data);
+    if (Array.isArray(data.trHistory) && !S.trHistory.length) { S.trHistory = data.trHistory; db.setMeta('trHistory', S.trHistory).catch(() => {}); }
+    gh.lastCount = Math.max(gh.lastCount, (data.cards || []).length); ghSaveMeta();
+    toast(r.added || r.updated ? `Restored ${r.added} word${r.added === 1 ? '' : 's'} from your GitHub backup${r.updated ? ` (${r.updated} updated)` : ''} ✓` : 'Everything is already on this phone ✓', { ms: 5000 });
+    render(true);
+    return r.added;
+  } catch (e) {
+    if (!silent) toast('Could not restore: ' + esc(e.message));
+    return 0;
+  }
+}
+
+async function ghConnect(token) {
+  gh.token = token.trim();
+  gh.error = '';
+  toast('Connecting to GitHub…');
+  try {
+    // reuse an existing Woordje backup (e.g. from another phone) before creating a new one
+    let id = '';
+    for (let page = 1; page <= 5 && !id; page++) {
+      const list = await ghApi(`/gists?per_page=100&page=${page}`);
+      const g = list.find((x) => x.files && x.files[GIST_FILE]);
+      if (g) id = g.id;
+      if (list.length < 100) break;
+    }
+    if (id) {
+      gh.gistId = id;
+      ghSaveMeta();
+      await ghRestore(true); // merge what's in the cloud into this phone first
+      await ghBackupNow(true);
+    } else {
+      const g = await ghApi('/gists', { method: 'POST', body: JSON.stringify({ description: 'Woordje backup — my Dutch words (updated automatically)', public: false, files: { [GIST_FILE]: { content: JSON.stringify(backupPayload()) } } }) });
+      Object.assign(gh, { gistId: g.id, last: Date.now(), lastCount: S.cards.size });
+      ghSaveMeta();
+      toast(`Automatic backup is on ✓ ${S.cards.size} words saved to GitHub`, { ms: 5000 });
+    }
+    closeSheet();
+    render(true);
+  } catch (e) {
+    gh.token = '';
+    toast(e.status === 401 ? 'That token didn’t work — check you copied all of it' : e.status === 403 || e.status === 404 ? 'The token needs the “gist” permission' : 'Could not connect: ' + esc(e.message), { ms: 6000 });
+  }
+}
+
+function ghDisconnect() {
+  Object.assign(gh, { token: '', gistId: '', last: 0, lastCount: 0, error: '' });
+  db.setMeta('gh', null).catch(() => {});
+  render(true);
+  toast('Automatic backup turned off (your backup stays on GitHub)');
+}
+
+function ghSetupHtml() {
+  return `
+    <div class="sheet-head"><h2>Automatic backup</h2><div class="sheet-head-actions"><button class="icon-btn" data-action="close-sheet" aria-label="Close">${icon('x', 22)}</button></div></div>
+    <p class="hint gh-intro">Your words are saved to a <b>private</b> backup in your GitHub account after every change. If your phone is cleared or you get a new one, connect again and everything comes back.</p>
+    <div class="install-steps">
+      <div class="step"><span>1</span><p>Tap <b>Create token</b>. GitHub opens with the right setting already ticked (<b>gist</b>).</p></div>
+      <a class="btn btn-soft btn-block" href="${TOKEN_URL}" target="_blank" rel="noopener">${icon('share', 18)} Create token on GitHub</a>
+      <div class="step"><span>2</span><p>Set <b>Expiration</b> to <b>No expiration</b>, scroll down, tap <b>Generate token</b>, then copy it.</p></div>
+      <div class="step"><span>3</span><p>Paste it here and tap <b>Connect</b>.</p></div>
+      <div class="key-row"><input id="gh-token" type="password" placeholder="ghp_…" autocomplete="off" autocapitalize="none" spellcheck="false"><button class="btn btn-sm btn-primary" data-action="gh-connect">Connect</button></div>
+      <p class="hint">The token is stored only on this phone and is used only to talk to GitHub.</p>
+    </div>`;
+}
+
+function ago(ts) {
+  const d = Date.now() - ts;
+  if (d < 60e3) return 'just now';
+  if (d < 3600e3) return `${Math.round(d / 60e3)} min ago`;
+  if (d < DAY) return `${Math.round(d / 3600e3)} h ago`;
+  return new Date(ts).toLocaleDateString();
+}
+
 // ───────────────────────── data import/export ─────────────────────────
 async function exportData() {
   const data = { app: 'woordje', version: 1, exportedAt: new Date().toISOString(), settings: S.settings, stats: S.stats, cards: [...S.cards.values()] };
@@ -1756,7 +1925,18 @@ async function exportData() {
 async function importData(file) {
   try {
     const data = JSON.parse(await file.text());
-    if (!data || !Array.isArray(data.cards)) throw new Error('bad');
+    const { added, updated } = await importBackup(data);
+    toast(`Imported: ${added} new, ${updated} updated`);
+    render();
+  } catch {
+    toast('That file is not a valid Woordje backup');
+  }
+}
+
+/** Merges a backup into this phone (never deletes anything). */
+async function importBackup(data) {
+  {
+    if (!data || !Array.isArray(data.cards)) throw new Error('Not a Woordje backup');
     let added = 0, updated = 0;
     const toSave = [];
     for (const c of data.cards) {
@@ -1774,10 +1954,13 @@ async function importData(file) {
       }
       saveStats();
     }
-    toast(`Imported: ${added} new, ${updated} updated`);
-    render();
-  } catch {
-    toast('That file is not a valid Woordje backup');
+    // bring back settings (languages, voice choice…) when this phone has none of its own yet
+    if (data.settings && added && added === S.cards.size) {
+      const { installedPacks, lastBackup, ...rest } = data.settings;
+      S.settings = { ...S.settings, ...rest, installedPacks: installedPacks || S.settings.installedPacks };
+      saveSettings(); applyTheme();
+    }
+    return { added, updated };
   }
 }
 
@@ -1841,6 +2024,12 @@ document.addEventListener('click', async (e) => {
     case 'open-add': openAdd(el.dataset.prefill || ''); break;
     case 'close-sheet': closeSheet(); break;
     case 'dictate': dictate(el); break;
+    case 'gh-setup': openSheet(ghSetupHtml()); setTimeout(() => { const i = $('#gh-token'); i && i.focus(); }, 300); break;
+    case 'gh-connect': { const v = ($('#gh-token').value || '').trim(); if (!v) { toast('Paste the token from GitHub first'); break; } el.disabled = true; await ghConnect(v); el.disabled = false; break; }
+    case 'gh-backup': ghBackupNow(true); break;
+    case 'gh-restore': el.disabled = true; await ghRestore(); el.disabled = false; break;
+    case 'gh-accept': gh.lastCount = S.cards.size; ghSaveMeta(); ghBackupNow(true); render(true); break;
+    case 'gh-disconnect': if (confirm('Turn off automatic backup on this phone?')) ghDisconnect(); break;
     case 'tr-swap': {
       const t = S.tr;
       const newSrc = t.src === 'nl' ? 'auto' : 'nl';
@@ -2142,6 +2331,7 @@ async function boot() {
   try {
     const [cards, settings, stats, elKey] = await Promise.all([db.allCards(), db.getMeta('settings'), db.getMeta('stats'), db.getMeta('elKey')]);
     S.elKey = elKey || '';
+    try { const g = await db.getMeta('gh'); if (g && g.token) Object.assign(gh, g); } catch {}
     try { S.trHistory = (await db.getMeta('trHistory')) || []; } catch {}
     for (const c of cards || []) S.cards.set(c.id, c);
     S.settings = { ...DEFAULT_SETTINGS, ...(settings || {}) };
@@ -2172,6 +2362,13 @@ async function boot() {
   requestPersistence().then((ok) => { const el = $('#storage-info'); if (el && ok) el.textContent = 'Your words are stored privately on this device (persistent storage on).'; });
   processPending();
   addEventListener('online', processPending);
+  // cloud backup: restore automatically if this phone lost its words, otherwise keep the backup fresh
+  if (gh.token) {
+    if (S.cards.size === 0 && gh.lastCount > 0) ghRestore();
+    else if (Date.now() - gh.last > 6 * 3600e3 || ghDirty) ghBackupNow();
+  }
+  addEventListener('online', () => { if (ghDirty) ghBackupNow(); });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && ghDirty) { clearTimeout(ghT); ghBackupNow(); } });
   addEventListener('offline', () => toast(`${icon('wifiOff', 16)} Offline — you can still review and add words`));
 
   // refresh due counts when coming back to the app

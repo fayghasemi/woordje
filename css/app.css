@@ -538,6 +538,14 @@ body.in-session .toast { bottom: calc(var(--safe-b) + 110px); }
 :root[data-theme="dark"] .toast { background: #2A2F3D; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .toast { background: #2A2F3D; } }
 
+/* backup */
+.notice-danger { background: var(--again-soft); border-color: transparent; flex-wrap: wrap; }
+.notice-danger > .ic:first-child { color: var(--again); }
+.notice-btns { display: flex; gap: 8px; width: 100%; padding-left: 32px; }
+a.set-row { color: inherit; text-decoration: none; }
+a.btn { text-decoration: none; }
+.gh-intro { margin-bottom: 14px; }
+
 /* header actions on Today */
 .head-actions { display: flex; align-items: center; gap: 6px; }
 .icon-btn.gear { background: var(--surface); box-shadow: var(--shadow-sm); border-radius: 999px; }
